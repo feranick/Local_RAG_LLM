@@ -24,6 +24,8 @@ works), or via environment variables which override those defaults:
                   (the collection must already exist — the script won't create it)
   RAG_PRUNE       "1"/"true" to delete from the collection when a file is
                   removed from the folder (makes the folder the source of truth)
+  RAG_OCR_FALLBACK "1"/"true" to auto-OCR a PDF (ocrmypdf) and retry when the
+                  server extracts no text. Same as passing --ocr-fallback.
 
 Get an API key:
   AnythingLLM -> Settings > Tools > Developer API
@@ -37,15 +39,20 @@ Usage:
   pip install requests
   echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key   # one-time
   # then, with TARGET filled in below:
-  python3 sync_folder.py            # add/update only
-  python3 sync_folder.py --prune    # full mirror (also deletes)
+  python3 sync_folder.py                       # add/update only
+  python3 sync_folder.py --prune               # full mirror (also deletes)
+  python3 sync_folder.py --ocr-fallback        # auto-OCR PDFs that extract empty
 """
 
 import os
 import sys
 import json
+import time
+import shutil
 import hashlib
 import pathlib
+import tempfile
+import subprocess
 
 try:
     import requests
@@ -76,6 +83,11 @@ if not API_KEY and KEY_FILE.is_file():
 # prune = delete from the collection when the file disappears from the folder.
 # enabled by --prune on the command line or RAG_PRUNE=1 in the environment.
 PRUNE = ("--prune" in sys.argv) or (os.environ.get("RAG_PRUNE", "").lower() in ("1", "true", "yes"))
+
+# ocr fallback = if a PDF fails because the server extracted no text, OCR it
+# locally (ocrmypdf) and retry once. enabled by --ocr-fallback or RAG_OCR_FALLBACK=1.
+# Requires the `ocrmypdf` command to be installed (sudo apt install ocrmypdf).
+OCR_FALLBACK = ("--ocr-fallback" in sys.argv) or (os.environ.get("RAG_OCR_FALLBACK", "").lower() in ("1", "true", "yes"))
 
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
@@ -156,8 +168,27 @@ def add_openwebui(session, path):
     r.raise_for_status()
     file_id = r.json().get("id")
     if TARGET and file_id:
-        session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/file/add",
-                     json={"file_id": file_id}, timeout=300).raise_for_status()
+        # Text extraction can lag behind the upload for large files, so a
+        # "content is empty" 400 may just mean processing isn't finished.
+        # Retry the attach for a while before giving up.
+        attempts = 15          # ~45s total
+        for i in range(attempts):
+            resp = session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/file/add",
+                                json={"file_id": file_id}, timeout=300)
+            if resp.status_code == 200:
+                return file_id
+            if resp.status_code == 400 and "empty" in resp.text.lower() and i < attempts - 1:
+                if i == 0:
+                    print("      (waiting for the server to finish extracting text…)")
+                time.sleep(3)
+                continue
+            # Permanent failure: delete the just-uploaded file so it doesn't
+            # linger on the server as an orphan, then surface the error.
+            try:
+                session.delete(f"{BASE_URL}/api/v1/files/{file_id}", timeout=60)
+            except Exception:
+                pass
+            resp.raise_for_status()   # a different error, or retries exhausted
     return file_id
 
 
@@ -175,6 +206,28 @@ ADAPTERS = {
     "anythingllm": (add_anythingllm, remove_anythingllm),
     "openwebui":   (add_openwebui,   remove_openwebui),
 }
+
+
+def make_ocr_copy(src: pathlib.Path):
+    """OCR a PDF locally into a temp copy (same filename). Returns the Path, or
+    None if OCR isn't possible. Caller removes the temp dir when done."""
+    if src.suffix.lower() != ".pdf":
+        return None
+    if shutil.which("ocrmypdf") is None:
+        print("[sync]     OCR fallback: 'ocrmypdf' not installed "
+              "(sudo apt install ocrmypdf) — skipping.")
+        return None
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="rag_ocr_"))
+    out = tmpdir / src.name
+    print(f"[sync]     OCR fallback: running ocrmypdf on {src.name} …")
+    try:
+        subprocess.run(["ocrmypdf", "--force-ocr", "--quiet", str(src), str(out)],
+                       check=True, timeout=1800)
+        return out
+    except Exception as e:
+        print(f"[sync]     OCR fallback failed: {e}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return None
 
 
 def main():
@@ -202,6 +255,7 @@ def main():
     files = state.setdefault("files", {})
 
     added = updated = removed = 0
+    failed = []   # (name, reason) for files that couldn't be added
 
     # --- add / update files currently on disk ---
     on_disk = set()
@@ -214,26 +268,56 @@ def main():
         entry = files.get(key)
         if entry and entry.get("hash") == digest:
             continue  # unchanged
+        is_update = bool(entry and entry.get("remote_id"))
+        print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
         try:
-            if entry and entry.get("remote_id"):
+            if is_update:
                 # changed file: remove the old copy first to avoid duplicates
-                print(f"[sync] updating {p.name} …")
                 remove_fn(session, entry["remote_id"])
-                updated += 1
-            else:
-                print(f"[sync] adding {p.name} …")
-                added += 1
             remote_id = add_fn(session, p)
             files[key] = {"hash": digest, "remote_id": remote_id}
+            updated += is_update
+            added += not is_update
         except requests.HTTPError as e:
             detail = ""
             try:
                 detail = (e.response.text or "")[:400]
             except Exception:
                 pass
-            print(f"[sync]   failed ({e})")
+            low = detail.lower()
+            empty_content = ("empty" in low and "content" in low)
+
+            # Auto-recovery: OCR the PDF locally and retry once (opt-in).
+            if empty_content and OCR_FALLBACK and p.suffix.lower() == ".pdf":
+                ocr_path = make_ocr_copy(p)
+                if ocr_path:
+                    try:
+                        remote_id = add_fn(session, ocr_path)
+                        files[key] = {"hash": digest, "remote_id": remote_id}
+                        added += not is_update
+                        updated += is_update
+                        print(f"[sync]   recovered via OCR: {p.name}")
+                        shutil.rmtree(ocr_path.parent, ignore_errors=True)
+                        continue
+                    except requests.HTTPError as e2:
+                        shutil.rmtree(ocr_path.parent, ignore_errors=True)
+                        print(f"[sync]   OCR retry still failed ({e2}) — the extraction "
+                              "engine itself may be broken (e.g. Tika not running).")
+
+            print(f"[sync]   FAILED: {p.name}")
             if detail:
-                print(f"[sync]   server said: {detail}")
+                print(f"[sync]     server said: {detail}")
+            if empty_content:
+                print("[sync]     hint: the server extracted no text. Common causes:")
+                print("[sync]       - extraction engine set to Tika/Docling but that service")
+                print("[sync]         isn't running -> revert to Default (or start Tika), in")
+                print("[sync]         Admin > Settings > Documents.")
+                print("[sync]       - the PDF has no text layer -> re-run with --ocr-fallback")
+                print("[sync]         (auto-OCRs and retries), or OCR manually with ocrmypdf.")
+            elif e.response is not None and e.response.status_code in (401, 403):
+                print("[sync]     hint: auth rejected -> check the API key (use the sk- key,")
+                print("[sync]       not the JWT token) in ~/.rag_sync_key.")
+            failed.append(p.name)
 
     # --- prune files deleted from the folder ---
     if PRUNE:
@@ -261,6 +345,13 @@ def main():
     print(f"[sync] done — {added} added, {updated} updated, {removed} removed, "
           f"{len(files)} tracked total"
           f"{' (prune ON)' if PRUNE else ''}.")
+
+    if failed:
+        print(f"[sync] {len(failed)} file(s) FAILED and were not added:")
+        for n in failed:
+            print(f"         - {n}")
+        print("[sync] these aren't tracked, so they'll retry on the next run once fixed.")
+        sys.exit(1)   # non-zero so cron / scripts can detect a problem
 
 
 if __name__ == "__main__":

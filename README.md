@@ -21,7 +21,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 |------|--------------|
 | `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, a live generation test, both containers, container→Ollama connectivity, and reboot-safe restart policies. |
-| `sync_folder.py` | Watches a local folder and uploads/embeds new or changed files into AnythingLLM or Open WebUI, so your knowledge base stays current. |
+| `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, optionally mirrors deletions (`--prune`), and can auto-OCR text-less PDFs (`--ocr-fallback`). |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
 ---
@@ -173,11 +173,25 @@ The collection/workspace must already exist and contain (or be about to receive)
 ### Running it
 
 ```bash
-pip install requests            # one-time dependency
+pip install requests                   # one-time dependency
 
-python3 sync_folder.py          # add/update only
-python3 sync_folder.py --prune  # full mirror (also removes deleted files)
+python3 sync_folder.py                 # add/update only
+python3 sync_folder.py --prune         # full mirror (also removes deleted files)
+python3 sync_folder.py --ocr-fallback  # auto-OCR PDFs that extract to empty, then retry
 ```
+
+`--ocr-fallback` (or `RAG_OCR_FALLBACK=1`): when the server reports "content empty" for a PDF, the script runs `ocrmypdf --force-ocr` on it locally and retries the upload once — since both the script and OCR run on the Spark, it can self-heal text-less PDFs with no manual step. Flags combine, e.g. `--prune --ocr-fallback`.
+
+Install the OCR tools once (only needed if you use `--ocr-fallback` or OCR PDFs by hand):
+
+```bash
+sudo apt update
+sudo apt install -y ocrmypdf jbig2enc
+```
+
+`ocrmypdf` pulls in Tesseract (the OCR engine) and Ghostscript automatically. `jbig2enc` is optional but recommended — it handles the "JBIG2" step you saw in the ocrmypdf output, compressing scanned/monochrome pages so the OCR'd PDFs don't balloon in size. For OCR in languages other than English, add the matching Tesseract pack, e.g. `sudo apt install tesseract-ocr-fra` for French.
+
+> **Caveat:** OCR fallback only helps when a PDF genuinely lacks a text layer. It will *not* fix a misconfigured extraction engine (e.g. Tika selected but not running) — in that case even the OCR'd copy fails, and the script reports it and moves on. So if *every* file fails, fix the engine (see troubleshooting / Tika section), don't rely on OCR.
 
 Environment variables override the in-file defaults for a one-off run:
 
@@ -195,6 +209,23 @@ Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the c
 For near-instant updates instead of polling, swap the loop for Python `watchdog` running as a systemd service. AnythingLLM also has built-in **Scheduled Jobs** and a beta **Live Document Sync** you can use instead.
 
 > API endpoint names shift between tool versions. If a call fails, check the tool's live API docs (Open WebUI: `http://localhost:3000/docs`) and adjust the endpoints in `sync_folder.py`.
+
+---
+
+## Better PDF extraction (optional: Tika)
+
+The **Default** extraction engine runs in-process and needs no extra service — good enough for most PDFs. For a library of varied scientific papers, **Apache Tika** extracts text far more reliably, but it's a separate service you must run. Do **not** just select "Tika" in the settings without starting it — extraction will fail with "content empty" (the container can't resolve the `tika` hostname).
+
+To run Tika and wire it in:
+
+```bash
+docker network create rag-net 2>/dev/null                       # shared network for name resolution
+docker run -d --name tika --restart unless-stopped \
+  --network rag-net apache/tika:latest
+sudo docker network connect rag-net open-webui                  # put Open WebUI on the same network
+```
+
+Then in **Admin → Settings → Documents**: Content Extraction Engine → **Tika**, server URL `http://tika:9998`, Save. Re-add any documents that previously failed. If you ever remove Tika, switch the engine back to **Default** first, or ingestion will break.
 
 ---
 
@@ -282,6 +313,15 @@ The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't
 
 **Typing `#` shows no popup, or `#Papers` isn't grounding answers.**
 The `#` menu lists **Knowledge collections that contain documents**. If it's empty, check **Workspace → Knowledge**: if there are 0 collections (or the collection has no files), that's the cause. Open WebUI does not auto-create a collection — create one under **Workspace → Knowledge → + New Knowledge**, then load documents into it (drag-and-drop if the files are on the machine running the browser, or run `sync_folder.py` with `RAG_TARGET` set to the new collection's id if the files live on the Spark in `~/papers`). Once the collection has documents, `#` will list it. Also make sure you *click* the collection in the popup rather than just typing the text.
+
+**A document fails to add with `400: The content provided is empty` (or a chat says "No sources found").**
+Open WebUI extracted no text from that file. The sync script now prints a hint when this happens; the usual causes, in order of likelihood:
+
+1. **Extraction engine points at a service that isn't running.** If **Admin → Settings → Documents → Content Extraction Engine** is set to **Tika** or **Docling** but you never started that container, extraction fails (the server log shows `Failed to resolve 'tika'`) and every file comes back empty. Fix: set the engine back to **Default** (in-process, no service needed), or actually run the service — see "Better PDF extraction with Tika" below.
+2. **The PDF has no text layer** (scanned/image-only). Test with `pdftotext file.pdf - | head`; if empty, OCR it first: `ocrmypdf --force-ocr in.pdf out.pdf`, then sync the OCR'd copy.
+3. **The built-in Default parser chokes on a specific (text-bearing) PDF.** Rare, but happens with unusual font/encoding. Either OCR it as above, or use Tika (below), which is far more tolerant.
+
+Filenames also matter: spaces or quotes in a name can break the upload — prefer `Underscore_Names.pdf`.
 
 **Ollama runs at half speed / high CPU, or a generation is very slow.**
 Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache. A slow first response is often just the model loading from disk.
