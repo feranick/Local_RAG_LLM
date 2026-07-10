@@ -24,6 +24,8 @@ works), or via environment variables which override those defaults:
                   (the collection must already exist — the script won't create it)
   RAG_PRUNE       "1"/"true" to delete from the collection when a file is
                   removed from the folder (makes the folder the source of truth)
+  RAG_FORCE       "1"/"true" to re-sync every file even if unchanged (removes the
+                  old copy first, then re-uploads). Same as passing --force.
   RAG_OCR_FALLBACK "1"/"true" to auto-OCR a PDF (ocrmypdf) and retry when the
                   server extracts no text. Same as passing --ocr-fallback.
   RAG_DESCRIBE_FIGURES "1"/"true" to render each PDF, have a local vision model
@@ -50,6 +52,7 @@ Usage:
   python3 sync_folder.py --prune               # full mirror (also deletes)
   python3 sync_folder.py --ocr-fallback        # auto-OCR PDFs that extract empty
   python3 sync_folder.py --describe-figures    # also index vision descriptions of plots
+  python3 sync_folder.py --force               # re-sync everything (re-embed), no duplicates
 """
 
 import os
@@ -92,6 +95,11 @@ if not API_KEY and KEY_FILE.is_file():
 # prune = delete from the collection when the file disappears from the folder.
 # enabled by --prune on the command line or RAG_PRUNE=1 in the environment.
 PRUNE = ("--prune" in sys.argv) or (os.environ.get("RAG_PRUNE", "").lower() in ("1", "true", "yes"))
+
+# force = re-sync every file even if unchanged (re-upload + re-embed). Old copies
+# are removed first via their tracked remote id, so no duplicates. Use after
+# changing the embedding model, chunk settings, or extraction engine.
+FORCE = ("--force" in sys.argv) or (os.environ.get("RAG_FORCE", "").lower() in ("1", "true", "yes"))
 
 # ocr fallback = if a PDF fails because the server extracted no text, OCR it
 # locally (ocrmypdf) and retry once. enabled by --ocr-fallback or RAG_OCR_FALLBACK=1.
@@ -369,8 +377,8 @@ def main():
         on_disk.add(key)
         digest = file_hash(p)
         entry = files.get(key)
-        if entry and entry.get("hash") == digest:
-            continue  # unchanged
+        if entry and entry.get("hash") == digest and not FORCE:
+            continue  # unchanged (use --force to re-sync anyway)
         is_update = bool(entry and entry.get("remote_id"))
         print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
         try:

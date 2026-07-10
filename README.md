@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.10.2**
+**Version 2026.07.10.3**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -181,7 +181,27 @@ python3 sync_folder.py                     # add/update only
 python3 sync_folder.py --prune             # full mirror (also removes deleted files)
 python3 sync_folder.py --ocr-fallback      # auto-OCR PDFs that extract to empty, then retry
 python3 sync_folder.py --describe-figures  # also index vision descriptions of plots/figures
+python3 sync_folder.py --force             # re-sync everything even if unchanged (see "Re-syncing")
 ```
+
+### Re-syncing / resetting
+
+The script skips files whose content hasn't changed. To deliberately re-upload and re-embed papers you've already synced — e.g. after changing the embedding model, chunk size, or extraction engine — use `--force`:
+
+```bash
+python3 sync_folder.py --force
+```
+
+`--force` treats every file as changed and, for anything it previously uploaded, **removes the old copy first (via its tracked remote id) before re-uploading** — so you get a clean refresh with no duplicates. It also regenerates figure docs if combined with `--describe-figures`.
+
+If you'd rather start completely fresh, delete the state file so nothing is remembered:
+
+```bash
+rm ~/.rag_sync_state.json
+python3 sync_folder.py
+```
+
+But note: deleting the state file forgets the remote ids, so the old copies are **not** removed and you'll get duplicates in the collection. For a clean slate this way, first empty (or delete and recreate) the Knowledge collection in the UI, then delete the state file and sync. In general, prefer `--force` — it's the tidy option.
 
 `--ocr-fallback` (or `RAG_OCR_FALLBACK=1`): when the server reports "content empty" for a PDF, the script runs `ocrmypdf --force-ocr` on it locally and retries the upload once — since both the script and OCR run on the Spark, it can self-heal text-less PDFs with no manual step. Flags combine, e.g. `--prune --ocr-fallback`.
 
