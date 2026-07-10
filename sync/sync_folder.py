@@ -26,6 +26,13 @@ works), or via environment variables which override those defaults:
                   removed from the folder (makes the folder the source of truth)
   RAG_OCR_FALLBACK "1"/"true" to auto-OCR a PDF (ocrmypdf) and retry when the
                   server extracts no text. Same as passing --ocr-fallback.
+  RAG_DESCRIBE_FIGURES "1"/"true" to render each PDF, have a local vision model
+                  describe its figures/plots, and upload those descriptions as a
+                  companion doc (so plots become retrievable). = --describe-figures.
+                  Needs PyMuPDF (pip install pymupdf) + a vision model in Ollama.
+  RAG_FIGURE_MODEL  vision model tag (default: llama3.2-vision)
+  RAG_OLLAMA_URL    Ollama base URL for figure calls (default: http://localhost:11434)
+  RAG_FIGURE_DPI    page render DPI for the vision model (default: 150)
 
 Get an API key:
   AnythingLLM -> Settings > Tools > Developer API
@@ -42,12 +49,14 @@ Usage:
   python3 sync_folder.py                       # add/update only
   python3 sync_folder.py --prune               # full mirror (also deletes)
   python3 sync_folder.py --ocr-fallback        # auto-OCR PDFs that extract empty
+  python3 sync_folder.py --describe-figures    # also index vision descriptions of plots
 """
 
 import os
 import sys
 import json
 import time
+import base64
 import shutil
 import hashlib
 import pathlib
@@ -88,6 +97,16 @@ PRUNE = ("--prune" in sys.argv) or (os.environ.get("RAG_PRUNE", "").lower() in (
 # locally (ocrmypdf) and retry once. enabled by --ocr-fallback or RAG_OCR_FALLBACK=1.
 # Requires the `ocrmypdf` command to be installed (sudo apt install ocrmypdf).
 OCR_FALLBACK = ("--ocr-fallback" in sys.argv) or (os.environ.get("RAG_OCR_FALLBACK", "").lower() in ("1", "true", "yes"))
+
+# describe figures = for each PDF, render its pages and have a local vision model
+# (via Ollama) describe any figures/plots, then upload those descriptions as a
+# companion document so figure content becomes retrievable. Text-based RAG can't
+# "see" plots; this bridges that gap. Enabled by --describe-figures / RAG_DESCRIBE_FIGURES=1.
+# Requires PyMuPDF (pip install pymupdf) and a vision model pulled in Ollama.
+DESCRIBE_FIGURES = ("--describe-figures" in sys.argv) or (os.environ.get("RAG_DESCRIBE_FIGURES", "").lower() in ("1", "true", "yes"))
+FIGURE_MODEL = os.environ.get("RAG_FIGURE_MODEL", "llama3.2-vision")   # Meta vision model
+OLLAMA_URL   = os.environ.get("RAG_OLLAMA_URL", "http://localhost:11434")
+FIGURE_DPI   = int(os.environ.get("RAG_FIGURE_DPI", "150"))
 
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
@@ -230,6 +249,90 @@ def make_ocr_copy(src: pathlib.Path):
         return None
 
 
+def _vlm_describe_page(session, png_b64):
+    """Ask the local vision model (Ollama) to describe figures on one page image."""
+    prompt = (
+        "You are examining one page of a scientific paper. If it contains any "
+        "figures, plots, charts, graphs, diagrams, or images, describe each in "
+        "detail: caption/title, what is plotted, the axis labels and units, the "
+        "series or curves shown, notable trends, and any clearly legible numeric "
+        "values or ranges. Do NOT invent precise numbers you cannot actually read "
+        "from the image. If the page has no figures (only body text, references, "
+        "tables of text, etc.), reply with exactly: NO_FIGURES"
+    )
+    r = session.post(f"{OLLAMA_URL}/api/generate",
+                     json={"model": FIGURE_MODEL, "prompt": prompt,
+                           "images": [png_b64], "stream": False},
+                     timeout=600)
+    r.raise_for_status()
+    return r.json().get("response", "").strip()
+
+
+def build_figures_doc(session, pdf_path):
+    """Render each page of a PDF and have the vision model describe any figures.
+    Writes the descriptions to a temp .md file. Returns (md_path, n_pages_with_figures)
+    or (None, 0) if nothing found / unavailable. Caller removes md_path.parent."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        print("[sync]   --describe-figures needs PyMuPDF (pip install pymupdf) — skipping.")
+        return None, 0
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as e:
+        print(f"[sync]   could not open {pdf_path.name} for figure rendering: {e}")
+        return None, 0
+
+    print(f"[sync]   describing figures in {pdf_path.name} ({doc.page_count} pages, "
+          f"model={FIGURE_MODEL})…")
+    sections = []
+    for i in range(doc.page_count):
+        try:
+            pix = doc[i].get_pixmap(dpi=FIGURE_DPI)
+            b64 = base64.b64encode(pix.tobytes("png")).decode()
+            desc = _vlm_describe_page(session, b64)
+        except requests.HTTPError as e:
+            print(f"[sync]   vision model call failed ({e}). Is '{FIGURE_MODEL}' pulled? "
+                  f"-> ollama pull {FIGURE_MODEL}")
+            doc.close()
+            return None, 0
+        except Exception as e:
+            print(f"[sync]   figure render/describe error on page {i + 1}: {e}")
+            continue
+        if desc and "NO_FIGURES" not in desc.upper():
+            sections.append(f"## {pdf_path.name} — page {i + 1}\n\n{desc}\n")
+    doc.close()
+
+    if not sections:
+        return None, 0
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="rag_fig_"))
+    out = tmpdir / f"{pdf_path.stem}_figures.md"
+    header = (f"# Figure descriptions for {pdf_path.name}\n\n"
+              "Auto-generated visual descriptions of figures/plots (via a vision "
+              "model). Numeric values are approximate — verify against the source "
+              "figure before relying on them.\n\n")
+    out.write_text(header + "\n".join(sections))
+    return out, len(sections)
+
+
+def attach_figures(session, src_pdf, key, files, add_fn):
+    """If enabled, build figure descriptions for a PDF and upload them as a
+    companion document, recording its remote id under files[key]['figures_id']."""
+    if not DESCRIBE_FIGURES or src_pdf.suffix.lower() != ".pdf":
+        return
+    md_path, n = build_figures_doc(session, src_pdf)
+    if not md_path:
+        return
+    try:
+        fig_id = add_fn(session, md_path)
+        files[key]["figures_id"] = fig_id
+        print(f"[sync]   + figure descriptions added ({n} page(s) with figures)")
+    except requests.HTTPError as e:
+        print(f"[sync]   figure-description upload failed ({e})")
+    finally:
+        shutil.rmtree(md_path.parent, ignore_errors=True)
+
+
 def main():
     if not API_KEY:
         die("RAG_API_KEY is not set")
@@ -272,12 +375,15 @@ def main():
         print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
         try:
             if is_update:
-                # changed file: remove the old copy first to avoid duplicates
+                # changed file: remove the old copy (and its figure doc) first
                 remove_fn(session, entry["remote_id"])
+                if entry.get("figures_id"):
+                    remove_fn(session, entry["figures_id"])
             remote_id = add_fn(session, p)
             files[key] = {"hash": digest, "remote_id": remote_id}
             updated += is_update
             added += not is_update
+            attach_figures(session, p, key, files, add_fn)
         except requests.HTTPError as e:
             detail = ""
             try:
@@ -298,6 +404,7 @@ def main():
                         updated += is_update
                         print(f"[sync]   recovered via OCR: {p.name}")
                         shutil.rmtree(ocr_path.parent, ignore_errors=True)
+                        attach_figures(session, p, key, files, add_fn)
                         continue
                     except requests.HTTPError as e2:
                         shutil.rmtree(ocr_path.parent, ignore_errors=True)
@@ -326,6 +433,8 @@ def main():
             try:
                 print(f"[sync] removing {name} (deleted from folder) …")
                 remove_fn(session, files[key].get("remote_id"))
+                if files[key].get("figures_id"):
+                    remove_fn(session, files[key]["figures_id"])
                 del files[key]
                 removed += 1
             except requests.HTTPError as e:

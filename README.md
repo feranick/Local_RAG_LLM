@@ -1,5 +1,4 @@
 # Local RAG on NVIDIA DGX Spark
-Version: 2026.07.10.1
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -174,11 +173,12 @@ The collection/workspace must already exist and contain (or be about to receive)
 ### Running it
 
 ```bash
-pip install requests                   # one-time dependency
+pip install requests                       # one-time dependency
 
-python3 sync_folder.py                 # add/update only
-python3 sync_folder.py --prune         # full mirror (also removes deleted files)
-python3 sync_folder.py --ocr-fallback  # auto-OCR PDFs that extract to empty, then retry
+python3 sync_folder.py                     # add/update only
+python3 sync_folder.py --prune             # full mirror (also removes deleted files)
+python3 sync_folder.py --ocr-fallback      # auto-OCR PDFs that extract to empty, then retry
+python3 sync_folder.py --describe-figures  # also index vision descriptions of plots/figures
 ```
 
 `--ocr-fallback` (or `RAG_OCR_FALLBACK=1`): when the server reports "content empty" for a PDF, the script runs `ocrmypdf --force-ocr` on it locally and retries the upload once — since both the script and OCR run on the Spark, it can self-heal text-less PDFs with no manual step. Flags combine, e.g. `--prune --ocr-fallback`.
@@ -199,6 +199,30 @@ Environment variables override the in-file defaults for a one-off run:
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 ```
+
+### Making figures/plots retrievable (`--describe-figures`)
+
+Text-only RAG can't "see" plots — the data locked in figures is invisible to retrieval. `--describe-figures` bridges that: for each PDF it renders every page, has a **local vision model** (Meta's Llama 3.2 Vision, via Ollama) describe any figures/plots/charts (caption, axes, series, trends, legible values), and uploads those descriptions as a companion document so they're retrievable alongside the text, with citations.
+
+One-time setup:
+
+```bash
+ollama pull llama3.2-vision       # the vision model (Meta; ~8 GB)
+pip install pymupdf               # renders PDF pages to images
+```
+
+Then:
+
+```bash
+python3 sync_folder.py --describe-figures            # combines with --prune / --ocr-fallback
+RAG_FIGURE_MODEL=llama3.2-vision:90b python3 sync_folder.py --describe-figures   # larger model
+```
+
+The companion doc is tracked with its source file: re-syncing a changed PDF regenerates it, and `--prune` removes it when the source is deleted.
+
+> **Important — numbers are approximate.** Vision models reliably capture *what* a figure shows and its trends, but they **hallucinate exact chart values**. Treat extracted numbers as approximate and verify against the source figure. For precise datapoints, use a plot-digitizer tool. This is a retrieval/understanding aid, not a data-extraction guarantee. It's also slower than a text-only sync (one model call per page), so it's opt-in.
+
+For a heavier-duty "search papers *by* their visual content" system (rendering each page as an image and retrieving visually with ColPali/ColQwen + a vector DB like Qdrant), that's a separate, larger build outside this text-RAG pipeline — worth it only if figure retrieval becomes central to your workflow.
 
 Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the collection mirrored to the folder). With your defaults in the script and the key in `~/.rag_sync_key`, the cron line stays clean:
 
