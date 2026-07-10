@@ -102,9 +102,22 @@ The scripts stand up the services; the last mile is done once in each web UI.
    - **Embedding Model:** this is a **free-text field, not a dropdown** — it will not auto-populate. Click into it and *type* the model name exactly as `ollama list` shows it: `nomic-embed-text` (use `nomic-embed-text:latest` if the short name is rejected). Then scroll down and click **Save** — the field doesn't apply until you save.
    - If you'd already uploaded documents, click **Reindex** afterward so they're re-embedded with this model.
    - (Optional) Chunk Size defaults to 1000 / overlap 100. For dense research papers, ~1500 / ~200 can improve retrieval; leave defaults otherwise.
-3. **Workspace → Knowledge → +** to create a collection, upload files. Reference it in chat with `#Papers`, or attach it to a custom Model so every chat retrieves from it automatically.
+3. **Workspace → Knowledge → +** to create a collection and upload files (see "Chatting with your papers" below for how to use it).
+4. Set Gemma as the default and hide the embedding model from the chat list:
+   - **Default chat model:** your **Settings → General → Default Model** → `gemma4:26b` (so new chats start on Gemma, not the embedding model). Note this is *not* the "Local/External Task Model" under Admin → Settings → Interface — that's only for background tasks like title/tag generation; leave it on "Current Model".
+   - **Hide the embedding model:** **Admin Panel → Settings → Models** → toggle `nomic-embed-text` off. It stays available for embedding documents; this just removes it from the chat dropdown so it can't be picked (or auto-selected) as a chat model.
 
-> **Why a separate embedding model?** The chat model (Gemma) writes answers; the embedding model turns your documents into vectors for retrieval. Without one, uploads silently fail. This is why the setup pulls `nomic-embed-text` alongside the chat model.
+> **Why a separate embedding model?** The chat model (Gemma) writes answers; the embedding model turns your documents into vectors for retrieval. Without one, uploads silently fail. This is why the setup pulls `nomic-embed-text` alongside the chat model. It is not a chat model — never select it to chat with (see troubleshooting if a chat echoes your prompt back).
+
+### Chatting with your papers (Open WebUI)
+
+The collection must already exist **and contain documents** (check **Workspace → Knowledge**) before it can be used. Then, in a **New Chat**:
+
+1. Select `gemma4:26b` in the model dropdown at the top.
+2. Type `#` in the message box and **click your collection** from the popup that appears (don't just type the text `#Papers` — that's literal text and attaches nothing). You'll see the collection appear as a chip above the input.
+3. Ask your question. Answers come back grounded in the papers, with sources.
+
+To make retrieval always-on without typing `#` each time, go to **Workspace → Models → + New Model**, set the base model to `gemma4:26b`, attach your Knowledge collection, optionally add a system prompt ("Answer using the attached papers and cite sources."), and save. That preset then appears in the model dropdown and retrieves automatically.
 
 ---
 
@@ -116,29 +129,36 @@ By default it only *adds/updates* — deleting a file from the folder leaves it 
 
 > **Don't mix methods on one collection.** The script tracks what *it* uploaded; documents you add by hand in the GUI are invisible to it. If you both drag files into the GUI and sync the same folder, you'll get duplicates, and `--prune` won't touch the GUI-added ones. Pick one method per collection: either manage documents entirely in the GUI, or entirely via the folder + script.
 
+**Create the collection first.** Open WebUI/AnythingLLM won't auto-create it — make the Knowledge collection (Open WebUI: **Workspace → Knowledge → + New Knowledge**) or workspace *before* syncing, and point `RAG_TARGET` at its id. If you sync to a non-existent target, files upload but land in no collection and `#` shows nothing.
+
+Set your defaults once in the CONFIG block at the top of `sync_folder.py` (`BACKEND`, `WATCH_DIR`, `TARGET`), store the API key in a protected file, and then a bare run just works:
+
 ```bash
 pip install requests
+echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key   # one-time; keeps the key out of the script
 
-# AnythingLLM: get an API key at Settings > Tools > Developer API
-RAG_BACKEND=anythingllm \
-RAG_API_KEY=xxxxxxxx \
-RAG_WATCH_DIR=$HOME/papers \
-RAG_TARGET=papers \
-python3 sync_folder.py
+python3 sync_folder.py            # add/update only
+python3 sync_folder.py --prune    # full mirror (also deletes)
 ```
 
-For Open WebUI, set `RAG_BACKEND=openwebui` and set `RAG_TARGET` to the knowledge collection id. Getting the API key takes two steps:
+Environment variables still override the in-file defaults if you prefer passing them per-run:
+
+```bash
+RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
+```
+
+Getting the Open WebUI API key takes two steps:
 
 1. **Enable the feature:** Admin Panel → Settings → **Authentication** → turn on **Enable API Key** (Save). In v0.10.x this toggle lives under Authentication, not General.
 2. **Create the key:** your user **Settings → Account**, scroll to the bottom, create a key (starts with `sk-`), and paste that into the script as `RAG_API_KEY`.
 
 The knowledge collection id is the last part of the collection's URL: `.../knowledge/<this-id>`.
 
-Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the collection mirrored to the folder):
+Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the collection mirrored to the folder). With your defaults in the script and the key in `~/.rag_sync_key`, the cron line stays clean:
 
 ```bash
 # crontab -e
-*/15 * * * * RAG_BACKEND=anythingllm RAG_API_KEY=xxxx RAG_WATCH_DIR=$HOME/papers RAG_TARGET=papers /usr/bin/python3 /path/to/sync_folder.py --prune >> $HOME/rag_sync.log 2>&1
+*/15 * * * * /usr/bin/python3 /path/to/sync_folder.py --prune >> $HOME/rag_sync.log 2>&1
 ```
 
 For near-instant updates instead of polling, swap the loop for Python `watchdog` running as a systemd service. AnythingLLM also has built-in **Scheduled Jobs** and a beta **Live Document Sync** you can use instead.
@@ -225,6 +245,12 @@ It isn't a dropdown — it's a free-text input. Type the model name in by hand (
 ```bash
 sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags | grep -o '"name":"[^"]*"'
 ```
+
+**The chat echoes my prompt back verbatim instead of answering.**
+The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting Gemma as the default model and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).
+
+**Typing `#` shows no popup, or `#Papers` isn't grounding answers.**
+The `#` menu lists **Knowledge collections that contain documents**. If it's empty, check **Workspace → Knowledge**: if there are 0 collections (or the collection has no files), that's the cause. Open WebUI does not auto-create a collection — create one under **Workspace → Knowledge → + New Knowledge**, then load documents into it (drag-and-drop if the files are on the machine running the browser, or run `sync_folder.py` with `RAG_TARGET` set to the new collection's id if the files live on the Spark in `~/papers`). Once the collection has documents, `#` will list it. Also make sure you *click* the collection in the popup rather than just typing the text.
 
 **Ollama runs at half speed / high CPU, or a generation is very slow.**
 Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache. A slow first response is often just the model loading from disk.

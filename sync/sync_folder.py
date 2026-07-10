@@ -12,13 +12,16 @@ A per-file record (content hash + the remote id returned at upload) is kept in
 a small state file so repeat runs only touch what changed. Designed to be run
 repeatedly (cron/systemd).
 
-Configure with environment variables (or edit the defaults below):
+Configure by editing the CONFIG block below (so a bare `python3 sync_folder.py`
+works), or via environment variables which override those defaults:
 
-  RAG_BACKEND     anythingllm | openwebui        (default: anythingllm)
-  RAG_API_KEY     API key from the tool's UI     (required)
+  RAG_BACKEND     anythingllm | openwebui        (default: openwebui)
+  RAG_API_KEY     API key from the tool's UI     (or use the key file, below)
+  RAG_KEY_FILE    path to a file holding the key (default: ~/.rag_sync_key)
   RAG_WATCH_DIR   folder to sync                  (default: ~/papers)
   RAG_BASE_URL    override the default base URL
   RAG_TARGET      AnythingLLM workspace slug  OR  Open WebUI knowledge id
+                  (the collection must already exist — the script won't create it)
   RAG_PRUNE       "1"/"true" to delete from the collection when a file is
                   removed from the folder (makes the folder the source of truth)
 
@@ -32,8 +35,10 @@ Endpoint names shift between versions; check each tool's /docs if a call fails
 
 Usage:
   pip install requests
-  RAG_API_KEY=xxxx RAG_TARGET=papers python3 sync_folder.py            # add/update only
-  RAG_API_KEY=xxxx RAG_TARGET=papers python3 sync_folder.py --prune    # full mirror
+  echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key   # one-time
+  # then, with TARGET filled in below:
+  python3 sync_folder.py            # add/update only
+  python3 sync_folder.py --prune    # full mirror (also deletes)
 """
 
 import os
@@ -48,10 +53,25 @@ except ImportError:
     sys.exit("Missing dependency: pip install requests")
 
 # ----------------------------- config -----------------------------------
-BACKEND   = os.environ.get("RAG_BACKEND", "anythingllm").lower()
-API_KEY   = os.environ.get("RAG_API_KEY", "")
+# Hard-code your settings here so you can just run:  python3 sync_folder.py
+# Any environment variable, if set, overrides the value here.
+#
+#   BACKEND  : "openwebui" or "anythingllm"
+#   WATCH_DIR: folder to sync
+#   TARGET   : Open WebUI knowledge id  /  AnythingLLM workspace slug
+#              (the collection must already exist — the script won't create it)
+BACKEND   = os.environ.get("RAG_BACKEND", "openwebui").lower()
 WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", str(pathlib.Path.home() / "papers")))
-TARGET    = os.environ.get("RAG_TARGET", "")   # workspace slug (AnythingLLM) / knowledge id (Open WebUI)
+TARGET    = os.environ.get("RAG_TARGET", "")   # <-- paste your knowledge id / workspace slug here
+
+# API KEY — kept OUT of this file for safety. Resolved in this order:
+#   1) RAG_API_KEY environment variable
+#   2) a key file (default ~/.rag_sync_key) containing just the key on one line
+# Create the key file once:   echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key
+KEY_FILE  = pathlib.Path(os.environ.get("RAG_KEY_FILE", str(pathlib.Path.home() / ".rag_sync_key")))
+API_KEY   = os.environ.get("RAG_API_KEY", "")
+if not API_KEY and KEY_FILE.is_file():
+    API_KEY = KEY_FILE.read_text().strip()
 
 # prune = delete from the collection when the file disappears from the folder.
 # enabled by --prune on the command line or RAG_PRUNE=1 in the environment.
