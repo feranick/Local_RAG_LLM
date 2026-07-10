@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.10.4**
+**Version 2026.07.10.5**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -23,7 +23,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 |------|--------------|
 | `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, a live generation test, both containers, container→Ollama connectivity, and reboot-safe restart policies. |
-| `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, optionally mirrors deletions (`--prune`), and can auto-OCR text-less PDFs (`--ocr-fallback`). |
+| `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, mirrors deletions (`--prune`), re-syncs on demand (`--force`), auto-OCRs text-less PDFs (`--ocr-fallback`), and describes figures in PDFs and standalone images via a vision model (`--describe-figures`). |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
 ---
@@ -239,6 +239,8 @@ Then:
 python3 sync_folder.py --describe-figures            # combines with --prune / --ocr-fallback / --force
 RAG_FIGURE_MODEL=llava:13b python3 sync_folder.py --describe-figures   # larger LLaVA variant
 ```
+
+This also indexes **standalone image files** in the folder — `.png`, `.jpg/.jpeg`, `.tif/.tiff`, `.webp`, `.bmp`, `.gif`. With `--describe-figures`, each image is described by the vision model and its description uploaded as a text document, so loose figures/screenshots/plots become retrievable too (they're skipped without the flag, since a raw image has no extractable text). Because a standalone image usually has no caption, the script also **passes the file name to the vision model as context** — so a descriptive name like `voltivity_resistivity_vs_temp.png` genuinely improves the description. Tracking, `--force`, and `--prune` all apply to images the same as documents.
 
 > **Vision model note (DGX Spark).** The default is **`llava`**, not Llama 3.2 Vision. The Spark's custom Blackwell-optimized Ollama build does **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model that this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
 

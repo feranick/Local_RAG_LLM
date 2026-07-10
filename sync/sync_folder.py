@@ -30,8 +30,10 @@ works), or via environment variables which override those defaults:
                   server extracts no text. Same as passing --ocr-fallback.
   RAG_DESCRIBE_FIGURES "1"/"true" to render each PDF, have a local vision model
                   describe its figures/plots, and upload those descriptions as a
-                  companion doc (so plots become retrievable). = --describe-figures.
-                  Needs PyMuPDF (pip install pymupdf) + a vision model in Ollama.
+                  companion doc (so plots become retrievable). Also indexes any
+                  standalone image files (png/jpg/tiff/…) the same way.
+                  = --describe-figures. Needs PyMuPDF (pip install pymupdf) + a
+                  vision model in Ollama.
   RAG_FIGURE_MODEL  vision model tag (default: llava). NOTE: the DGX Spark's
                   custom Ollama build does NOT support the 'mllama' architecture,
                   so llama3.2-vision will not load there; llava does.
@@ -124,8 +126,12 @@ DEFAULT_URLS = {
 }
 BASE_URL = os.environ.get("RAG_BASE_URL", DEFAULT_URLS.get(BACKEND, ""))
 
-# file types worth embedding
+# document types uploaded directly (text is extracted server-side)
 EXTS = {".pdf", ".txt", ".md", ".docx", ".doc", ".epub", ".csv", ".html", ".rtf", ".pptx"}
+
+# standalone image types: indexed only with --describe-figures, by uploading a
+# vision-model description of the image (the image itself has no extractable text).
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
 
 STATE_FILE = pathlib.Path.home() / ".rag_sync_state.json"
 # -------------------------------------------------------------------------
@@ -259,17 +265,27 @@ def make_ocr_copy(src: pathlib.Path):
         return None
 
 
-def _vlm_describe_page(session, png_b64):
-    """Ask the local vision model (Ollama) to describe figures on one page image."""
-    prompt = (
-        "You are examining one page of a scientific paper. If it contains any "
-        "figures, plots, charts, graphs, diagrams, or images, describe each in "
-        "detail: caption/title, what is plotted, the axis labels and units, the "
-        "series or curves shown, notable trends, and any clearly legible numeric "
-        "values or ranges. Do NOT invent precise numbers you cannot actually read "
-        "from the image. If the page has no figures (only body text, references, "
-        "tables of text, etc.), reply with exactly: NO_FIGURES"
-    )
+PAGE_PROMPT = (
+    "You are examining one page of a scientific paper. If it contains any "
+    "figures, plots, charts, graphs, diagrams, or images, describe each in "
+    "detail: caption/title, what is plotted, the axis labels and units, the "
+    "series or curves shown, notable trends, and any clearly legible numeric "
+    "values or ranges. Do NOT invent precise numbers you cannot actually read "
+    "from the image. If the page has no figures (only body text, references, "
+    "tables of text, etc.), reply with exactly: NO_FIGURES"
+)
+
+IMAGE_PROMPT = (
+    "Describe this image in detail. If it is a figure, plot, chart, graph, or "
+    "diagram, include the caption/title, the axis labels and units, the series "
+    "or curves shown, notable trends, and any clearly legible numeric values or "
+    "ranges. If it is a photo or other image, describe its content. Do NOT invent "
+    "precise numbers you cannot actually read from the image."
+)
+
+
+def _vlm_describe(session, png_b64, prompt):
+    """Ask the local vision model (Ollama) to describe one image."""
     r = session.post(f"{OLLAMA_URL}/api/generate",
                      json={"model": FIGURE_MODEL, "prompt": prompt,
                            "images": [png_b64], "stream": False},
@@ -300,7 +316,7 @@ def build_figures_doc(session, pdf_path):
         try:
             pix = doc[i].get_pixmap(dpi=FIGURE_DPI)
             b64 = base64.b64encode(pix.tobytes("png")).decode()
-            desc = _vlm_describe_page(session, b64)
+            desc = _vlm_describe(session, b64, PAGE_PROMPT)
         except requests.HTTPError as e:
             print(f"[sync]   vision model call failed ({e}). Is '{FIGURE_MODEL}' pulled? "
                   f"-> ollama pull {FIGURE_MODEL}")
@@ -343,6 +359,45 @@ def attach_figures(session, src_pdf, key, files, add_fn):
         shutil.rmtree(md_path.parent, ignore_errors=True)
 
 
+def build_image_doc(session, img_path):
+    """Describe a standalone image file with the vision model and write the
+    description to a temp .md. Returns the md Path, or None. Caller removes
+    md_path.parent."""
+    try:
+        import fitz  # PyMuPDF also opens image files
+    except ImportError:
+        print("[sync]   indexing images needs PyMuPDF (pip install pymupdf) — skipping.")
+        return None
+    try:
+        doc = fitz.open(str(img_path))
+        b64 = base64.b64encode(doc[0].get_pixmap().tobytes("png")).decode()
+        doc.close()
+        # standalone images often lack a caption; the file name is frequently the
+        # only context, so feed it to the model as a hint.
+        prompt = (f"{IMAGE_PROMPT}\n\nContext: this image's file name is "
+                  f"\"{img_path.name}\", which often hints at its subject or the "
+                  f"quantities shown. Use it as a clue where relevant, but do not "
+                  f"contradict what you actually see in the image.")
+        desc = _vlm_describe(session, b64, prompt)
+    except requests.HTTPError as e:
+        print(f"[sync]   vision model call failed ({e}). Is '{FIGURE_MODEL}' pulled? "
+              f"-> ollama pull {FIGURE_MODEL}")
+        return None
+    except Exception as e:
+        print(f"[sync]   could not process image {img_path.name}: {e}")
+        return None
+    if not desc:
+        return None
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="rag_img_"))
+    out = tmpdir / f"{img_path.stem}_image.md"
+    header = (f"# Description of image {img_path.name}\n\n"
+              "Auto-generated description of a standalone image (via a vision "
+              "model). Numeric values are approximate — verify against the source "
+              "image before relying on them.\n\n")
+    out.write_text(header + desc + "\n")
+    return out
+
+
 def main():
     if not API_KEY:
         die("RAG_API_KEY is not set")
@@ -373,7 +428,8 @@ def main():
     # --- add / update files currently on disk ---
     on_disk = set()
     for p in sorted(WATCH_DIR.rglob("*")):
-        if not p.is_file() or p.suffix.lower() not in EXTS:
+        ext = p.suffix.lower()
+        if not p.is_file() or ext not in (EXTS | IMAGE_EXTS):
             continue
         key = str(p)
         on_disk.add(key)
@@ -382,6 +438,42 @@ def main():
         if entry and entry.get("hash") == digest and not FORCE:
             continue  # unchanged (use --force to re-sync anyway)
         is_update = bool(entry and entry.get("remote_id"))
+
+        # --- standalone image files: index a vision description of the image ---
+        if ext in IMAGE_EXTS:
+            if not DESCRIBE_FIGURES:
+                print(f"[sync] skipping image {p.name} "
+                      "(run with --describe-figures to index images)")
+                continue
+            print(f"[sync] {'updating' if is_update else 'adding'} image {p.name} …")
+            try:
+                if is_update:
+                    remove_fn(session, entry["remote_id"])
+                md = build_image_doc(session, p)
+                if not md:
+                    failed.append(p.name)
+                    continue
+                try:
+                    remote_id = add_fn(session, md)
+                    files[key] = {"hash": digest, "remote_id": remote_id}
+                finally:
+                    shutil.rmtree(md.parent, ignore_errors=True)
+                updated += is_update
+                added += not is_update
+                print("[sync]   + image description added")
+            except requests.HTTPError as e:
+                detail = ""
+                try:
+                    detail = (e.response.text or "")[:400]
+                except Exception:
+                    pass
+                print(f"[sync]   FAILED: {p.name}")
+                if detail:
+                    print(f"[sync]     server said: {detail}")
+                failed.append(p.name)
+            continue
+
+        # --- document files (pdf / text) ---
         print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
         try:
             if is_update:
