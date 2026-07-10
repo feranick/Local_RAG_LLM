@@ -97,7 +97,11 @@ The scripts stand up the services; the last mile is done once in each web UI.
 ### Open WebUI — `http://localhost:3000`
 
 1. Create the first (admin) account — click **Sign up**; the first account created becomes admin. It's local only, and works from any address (localhost or LAN IP) since it's stored server-side.
-2. **Admin Settings → Documents** → Embedding engine **Ollama**, model `nomic-embed-text`.
+2. **Admin Settings → Documents**:
+   - **Embedding Model Engine:** Ollama, with URL `http://host.docker.internal:11434`.
+   - **Embedding Model:** this is a **free-text field, not a dropdown** — it will not auto-populate. Click into it and *type* the model name exactly as `ollama list` shows it: `nomic-embed-text` (use `nomic-embed-text:latest` if the short name is rejected). Then scroll down and click **Save** — the field doesn't apply until you save.
+   - If you'd already uploaded documents, click **Reindex** afterward so they're re-embedded with this model.
+   - (Optional) Chunk Size defaults to 1000 / overlap 100. For dense research papers, ~1500 / ~200 can improve retrieval; leave defaults otherwise.
 3. **Workspace → Knowledge → +** to create a collection, upload files. Reference it in chat with `#Papers`, or attach it to a custom Model so every chat retrieves from it automatically.
 
 > **Why a separate embedding model?** The chat model (Gemma) writes answers; the embedding model turns your documents into vectors for retrieval. Without one, uploads silently fail. This is why the setup pulls `nomic-embed-text` alongside the chat model.
@@ -203,6 +207,12 @@ The AnythingLLM container was launched without `--add-host=host.docker.internal:
 
 **Open WebUI shows an "authorization failure" over the LAN IP.**
 No admin account exists yet, or you're on the login screen without one. Click **Sign up** — the first account becomes admin and works from any address.
+
+**The Embedding Model field in Open WebUI won't populate / stays empty even after refresh.**
+It isn't a dropdown — it's a free-text input. Type the model name in by hand (`nomic-embed-text`, or `nomic-embed-text:latest`) exactly as `ollama list` shows it, then click **Save**. This is expected behavior, not a connection problem — you can confirm the connection is fine with:
+```bash
+sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags | grep -o '"name":"[^"]*"'
+```
 
 **Ollama runs at half speed / high CPU, or a generation is very slow.**
 Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache. A slow first response is often just the model loading from disk.
