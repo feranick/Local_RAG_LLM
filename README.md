@@ -1,5 +1,7 @@
 # Local RAG on NVIDIA DGX Spark
 
+**Version 2026.07.10.2**
+
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
 This repo reproduces, in a few scripts, the stack:
