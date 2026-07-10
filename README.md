@@ -2,6 +2,8 @@
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
+This repo reproduces, in a few scripts, the stack:
+
 ```
 Ollama  (serves the chat model + an embedding model)
    │
@@ -17,9 +19,10 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 
 | File | What it does |
 |------|--------------|
-| `setup_local_rag.sh` | Installs Ollama, configures it for container access, pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
+| `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, a live generation test, both containers, container→Ollama connectivity, and reboot-safe restart policies. |
 | `sync_folder.py` | Watches a local folder and uploads/embeds new or changed files into AnythingLLM or Open WebUI, so your knowledge base stays current. |
+| `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
 ---
 
@@ -36,7 +39,7 @@ Both Docker images are multi-arch and run natively on ARM64.
 ## Quick start
 
 ```bash
-chmod +x setup_local_rag.sh llm_stack_healthcheck.sh
+chmod +x setup_local_rag.sh llm_stack_healthcheck.sh uninstall_local_rag.sh
 
 # full stack with defaults (chat model gemma4:26b, embedding nomic-embed-text)
 ./setup_local_rag.sh
@@ -48,16 +51,15 @@ chmod +x setup_local_rag.sh llm_stack_healthcheck.sh
 The setup script will, in order:
 
 1. Install Ollama if it isn't already present.
-2. Configure Ollama to listen on `0.0.0.0:11434` (a systemd override) so containers can reach it, then restart it.
+2. Ensure Ollama listens on `0.0.0.0:11434` so containers can reach it. If a systemd service exists it adds a bind override; if none exists (e.g. a manual `ollama serve`) it creates a proper service that runs as your user and starts on boot.
 3. Wait for the Ollama API to come up.
 4. Pull the chat model and the embedding model (skipped if already present).
 5. Launch **Open WebUI** on port 3000 (with `--gpus all` when a GPU test succeeds).
 6. Create AnythingLLM's storage folder with the correct ownership and launch **AnythingLLM** on port 3001.
 
-It's safe to re-run: containers are recreated cleanly, while pulled models, Ollama config, and data volumes are preserved.
+It's safe to re-run: containers are recreated cleanly, while pulled models, Ollama config, and data volumes are preserved. When run with `sudo`, it correctly targets your real home directory (not root's).
 
 ### Options
-The default model is `Gemma4:26b`.
 
 ```bash
 ./setup_local_rag.sh --chat-model llama3.3:70b   # use a different chat model
@@ -65,15 +67,6 @@ The default model is `Gemma4:26b`.
 ./setup_local_rag.sh --skip-openwebui             # AnythingLLM only
 ./setup_local_rag.sh --skip-anythingllm           # Open WebUI only
 ./setup_local_rag.sh --skip-models                # don't pull models
-
-# Llama 3.3 70B as the chat model
-./setup_local_rag.sh --chat-model llama3.3:70b
-
-# Qwen 3 72B
-./setup_local_rag.sh --chat-model qwen3:72b
-
-# the larger dense Gemma
-./setup_local_rag.sh --chat-model gemma4:31b
 ```
 
 You can also edit the `CONFIG` block at the top of the script (ports, storage path, model names).
@@ -95,7 +88,7 @@ The scripts stand up the services; the last mile is done once in each web UI.
 
 ### Open WebUI — `http://localhost:3000`
 
-1. Create the first (admin) account — it's local only.
+1. Create the first (admin) account — click **Sign up**; the first account created becomes admin. It's local only, and works from any address (localhost or LAN IP) since it's stored server-side.
 2. **Admin Settings → Documents** → Embedding engine **Ollama**, model `nomic-embed-text`.
 3. **Workspace → Knowledge → +** to create a collection, upload files. Reference it in chat with `#Papers`, or attach it to a custom Model so every chat retrieves from it automatically.
 
@@ -133,6 +126,28 @@ For near-instant updates instead of polling, swap the loop for Python `watchdog`
 
 ---
 
+## Uninstall / clean reinstall
+
+```bash
+# remove the software but KEEP your data + models (default, safe)
+./uninstall_local_rag.sh
+
+# remove EVERYTHING including data and pulled models (for a from-scratch test)
+./uninstall_local_rag.sh --purge-data
+
+# remove only the containers, leave Ollama intact
+./uninstall_local_rag.sh --keep-ollama
+```
+
+To test the setup script from a clean system:
+
+- **True fresh test:** `./uninstall_local_rag.sh --purge-data` then `./setup_local_rag.sh`. Note this re-downloads the models (~17 GB for `gemma4:26b` + `nomic-embed-text`).
+- **Fast iteration:** `./uninstall_local_rag.sh` (no purge) keeps the models on disk, so the re-run reuses them.
+
+Docker and the NVIDIA Container Toolkit are never removed — they ship with DGX OS and other apps rely on them.
+
+---
+
 ## Ports
 
 | Service | URL | Port |
@@ -147,13 +162,20 @@ To reach a UI from your laptop, SSH-tunnel: `ssh -L 3001:localhost:3001 user@spa
 
 ## Troubleshooting
 
-These are the exact issues encountered while bringing this stack up, and their fixes (all already handled by the scripts).
+These are the exact issues encountered while bringing this stack up, and their fixes (all now handled by the scripts).
 
-**A model works from the Ollama CLI but doesn't appear in a web UI.**
-The container can't reach Ollama. By default Ollama binds to `127.0.0.1`; inside a container `host.docker.internal` resolves to the host gateway (e.g. `172.17.0.1`), which Ollama then refuses. Fix: bind Ollama to `0.0.0.0` (the setup script's systemd override) and launch containers with `--add-host=host.docker.internal:host-gateway`. Test from inside a container:
+**A model works from the Ollama CLI but doesn't appear in a web UI, or a container "cannot reach Ollama".**
+The container can't reach Ollama. By default Ollama binds to `127.0.0.1`; inside a container `host.docker.internal` resolves to the host gateway (e.g. `172.17.0.1`), which Ollama then refuses. Fix: bind Ollama to `0.0.0.0` and launch containers with `--add-host=host.docker.internal:host-gateway`. Check what address Ollama is bound to:
+```bash
+sudo ss -tlnp | grep 11434     # want 0.0.0.0:11434, not 127.0.0.1:11434
+```
+Test from inside a container:
 ```bash
 sudo docker exec -it open-webui curl http://host.docker.internal:11434/api/tags
 ```
+
+**"Unit ollama.service could not be found" / systemd service not active but API works.**
+Ollama is running as a manual `ollama serve` (bound to localhost), with no systemd service. The setup script now detects this and creates a proper service that runs as your user and binds `0.0.0.0`. To fix by hand: `sudo pkill -f "ollama serve"`, create `/etc/systemd/system/ollama.service` with `User=<you>` and `Environment="OLLAMA_HOST=0.0.0.0:11434"`, then `sudo systemctl enable --now ollama`. Don't start `ollama serve` manually afterward — the service handles it; the CLI still works.
 
 **AnythingLLM crash-loops with `unable to open database file: ../storage/anythingllm.db`.**
 Its storage folder isn't writable by the container's user. AnythingLLM runs as UID 1000, so the mounted folder must be owned by it:
@@ -166,8 +188,14 @@ The setup script does this automatically before launching the container.
 **AnythingLLM can't reach Ollama even though Open WebUI can.**
 The AnythingLLM container was launched without `--add-host=host.docker.internal:host-gateway`. Recreate it with the flag (the setup script includes it).
 
-**Ollama runs at half speed / high CPU.**
-Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache.
+**Open WebUI shows an "authorization failure" over the LAN IP.**
+No admin account exists yet, or you're on the login screen without one. Click **Sign up** — the first account becomes admin and works from any address.
+
+**Ollama runs at half speed / high CPU, or a generation is very slow.**
+Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache. A slow first response is often just the model loading from disk.
+
+**Unloading a model from memory.**
+`ollama ps` shows what's loaded; `ollama stop <model>` unloads it immediately. Ollama also auto-unloads after ~5 min idle (tune with the `keep_alive` setting or `OLLAMA_KEEP_ALIVE`).
 
 **Do I need to restart containers after a reboot?**
 No. Ollama is a systemd service (auto-starts), and both containers use a restart policy (`always` / `unless-stopped`), so Docker relaunches them on boot. Confirm with:
@@ -191,6 +219,8 @@ Start with **AnythingLLM** for a pure "know my papers" use case; run **Open WebU
 
 ---
 
-## A note on the model
+## Model notes
 
-The original guide assumed there was no "Gemma 4" and suggested Gemma 3 27B. As of 2026, **Gemma 4 does exist** (released April 2026, Apache 2.0 license), with sizes including `gemma4:12b`, `gemma4:26b` (a mixture-of-experts model, ~4B active params per token — a great speed/quality fit for the Spark's bandwidth), and `gemma4:31b`. This stack defaults to `gemma4:26b`. Whatever tag `ollama list` shows is what you select as the chat model — change it with `--chat-model` or in the UI at any time.
+Sizes that fit the Spark's 128 GB unified memory (~110 GB usable), roughly: FP16 up to ~55B params, INT8 up to ~110B, and 4-bit/NVFP4 up to ~200B. The real bottleneck is memory bandwidth (~273 GB/s), so bigger models fit but generate more slowly — 4-bit quants are the sweet spot.
+
+This stack defaults to `gemma4:26b` (a mixture-of-experts model, ~4B active params per token — fast on the Spark's bandwidth). Other good picks: `gemma4:31b`, `llama3.3:70b`, `qwen3:72b`, `deepseek-r1:70b`. Whatever tag `ollama list` shows is what you select as the chat model — change it with `--chat-model` or in the UI at any time.

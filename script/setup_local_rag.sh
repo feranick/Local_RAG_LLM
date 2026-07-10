@@ -31,7 +31,7 @@ EMBED_MODEL="nomic-embed-text"    # embedding model — REQUIRED for RAG
 OLLAMA_PORT=11434
 OPENWEBUI_PORT=3000
 ANYTHINGLLM_PORT=3001
-STORAGE_LOCATION="${HOME}/anythingllm"   # AnythingLLM persistent data
+STORAGE_LOCATION=""              # AnythingLLM data dir (blank = <real-user-home>/anythingllm, auto-detected)
 INSTALL_OPENWEBUI=1
 INSTALL_ANYTHINGLLM=1
 PULL_MODELS=1
@@ -50,6 +50,14 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
+
+# resolve the real (non-root) user even when the script is run via sudo,
+# so models and data land in the user's home, not root's.
+RUN_USER="${SUDO_USER:-$USER}"
+RUN_GROUP="$(id -gn "$RUN_USER" 2>/dev/null || echo "$RUN_USER")"
+REAL_HOME="$(getent passwd "$RUN_USER" 2>/dev/null | cut -d: -f6)"
+[ -z "$REAL_HOME" ] && REAL_HOME="$HOME"
+: "${STORAGE_LOCATION:=$REAL_HOME/anythingllm}"
 
 GREEN=$'\e[32m'; RED=$'\e[31m'; YELLOW=$'\e[33m'; BOLD=$'\e[1m'; RESET=$'\e[0m'
 step() { echo; echo "${BOLD}==> $1${RESET}"; }
@@ -79,21 +87,56 @@ else
 fi
 
 # --------------------------------------------------------------------------
-step "2/6  Ollama — bind to 0.0.0.0 so containers can reach it"
-OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
-OVERRIDE_FILE="${OVERRIDE_DIR}/override.conf"
-if [ -f "$OVERRIDE_FILE" ] && grep -q "OLLAMA_HOST=0.0.0.0" "$OVERRIDE_FILE"; then
-  ok "OLLAMA_HOST already set to 0.0.0.0:${OLLAMA_PORT}"
-else
-  sudo mkdir -p "$OVERRIDE_DIR"
-  sudo tee "$OVERRIDE_FILE" >/dev/null <<EOF
+step "2/6  Ollama — configure service to listen on 0.0.0.0"
+# Containers reach the host Ollama via host.docker.internal, which resolves to
+# the docker bridge gateway — so Ollama MUST bind 0.0.0.0, not 127.0.0.1.
+OLLAMA_BIN="$(command -v ollama || echo /usr/local/bin/ollama)"
+
+if systemctl list-unit-files 2>/dev/null | grep -q '^ollama\.service'; then
+  # A systemd unit exists — add a drop-in override for the bind address.
+  OVERRIDE_DIR="/etc/systemd/system/ollama.service.d"
+  if [ -f "${OVERRIDE_DIR}/override.conf" ] && grep -q "OLLAMA_HOST=0.0.0.0" "${OVERRIDE_DIR}/override.conf"; then
+    ok "existing ollama.service already bound to 0.0.0.0:${OLLAMA_PORT}"
+  else
+    sudo mkdir -p "$OVERRIDE_DIR"
+    sudo tee "${OVERRIDE_DIR}/override.conf" >/dev/null <<EOF
 [Service]
 Environment="OLLAMA_HOST=0.0.0.0:${OLLAMA_PORT}"
 EOF
-  sudo systemctl daemon-reload
-  sudo systemctl restart ollama
-  ok "Configured OLLAMA_HOST=0.0.0.0:${OLLAMA_PORT} and restarted service"
+    ok "added 0.0.0.0 bind override to existing ollama.service"
+  fi
+else
+  # No systemd unit (a manual 'ollama serve', or an install that didn't create
+  # one). Create a proper service that runs as the real user so it can see that
+  # user's already-pulled models in ~/.ollama, and binds to 0.0.0.0.
+  warn "no ollama.service found — creating one (runs as '${RUN_USER}', binds 0.0.0.0)"
+  sudo pkill -f "ollama serve" 2>/dev/null || true   # free the port from any manual instance
+  sleep 1
+  sudo tee /etc/systemd/system/ollama.service >/dev/null <<EOF
+[Unit]
+Description=Ollama Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=${OLLAMA_BIN} serve
+User=${RUN_USER}
+Group=${RUN_GROUP}
+Restart=always
+RestartSec=3
+Environment="OLLAMA_HOST=0.0.0.0:${OLLAMA_PORT}"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  ok "created /etc/systemd/system/ollama.service"
 fi
+
+sudo systemctl daemon-reload
+sudo systemctl enable ollama >/dev/null 2>&1 || true
+sudo systemctl restart ollama
+ok "ollama.service enabled (starts on boot) and (re)started"
 
 # wait for the API to come up
 step "3/6  Ollama — wait for API"

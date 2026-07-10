@@ -65,8 +65,15 @@ fi
 head "2. GPU"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-  GPU=$(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1)
-  [ -n "$GPU" ] && ok "GPU visible: $GPU" || bad "nvidia-smi present but returned nothing"
+  GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d '\r')
+  if [ -n "$GPU" ] && [ "$GPU" != "-1" ]; then
+    ok "GPU visible: $GPU"
+    # memory line is informational; GB10 unified memory may report [N/A]
+    MEM=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1 | tr -d '\r')
+    [ -n "$MEM" ] && echo "      memory (used/total): $MEM"
+  else
+    warn "nvidia-smi present but returned no usable name (unified-memory quirk on GB10 — usually harmless)"
+  fi
 else
   warn "nvidia-smi not found on PATH"
 fi
@@ -80,9 +87,13 @@ if echo "$MODELS" | grep -q "\"$TEST_MODEL\""; then
   RESP=$(curl -fsS --max-time 120 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)
   END=$(date +%s)
   if echo "$RESP" | grep -q '"response"'; then
-    TEXT=$(echo "$RESP" | grep -o '"response":"[^"]*"' | head -1 | sed 's/"response":"//; s/"$//')
+    TEXT=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("response","").strip())' 2>/dev/null)
+    [ -z "$TEXT" ] && TEXT="(empty)"
     ok "Model generated a response in $((END-START))s"
     echo "      model said: ${TEXT}"
+    if [ "$((END-START))" -gt 20 ]; then
+      warn "that was slow — check 'ollama ps' shows 100% GPU (not a CPU split / cold load)"
+    fi
   else
     bad "Generation call failed (model loaded but no response)"
   fi
@@ -94,11 +105,9 @@ fi
 # -----------------------------------------------------------------
 head "4. Open WebUI  ($OPENWEBUI_URL)"
 
-if [ "$DOCKER" != "docker" ] || docker info >/dev/null 2>&1; then
-  STATE=$($DOCKER inspect -f '{{.State.Status}}' "$OPENWEBUI_CONTAINER" 2>/dev/null)
-  [ "$STATE" = "running" ] && ok "container '$OPENWEBUI_CONTAINER' is running" \
-                           || bad "container '$OPENWEBUI_CONTAINER' state: ${STATE:-not found}"
-fi
+STATE=$($DOCKER inspect -f '{{.State.Status}}' "$OPENWEBUI_CONTAINER" 2>/dev/null)
+[ "$STATE" = "running" ] && ok "container '$OPENWEBUI_CONTAINER' is running" \
+                         || bad "container '$OPENWEBUI_CONTAINER' state: ${STATE:-not found}"
 if curl -fsS --max-time 5 "$OPENWEBUI_URL" >/dev/null 2>&1; then
   ok "Open WebUI responding at $OPENWEBUI_URL"
 else
@@ -155,6 +164,6 @@ if [ "$FAIL" -eq 0 ]; then
   echo "  ${GREEN}${BOLD}All good — the stack is healthy.${RESET}"
   exit 0
 else
-  echo "  ${RED}${BOLD}Some checks failed — see the ✗ lines above.${RESET}"
+  echo "  ${RED}${BOLD}Some checks failed — see the x lines above.${RESET}"
   exit 1
 fi

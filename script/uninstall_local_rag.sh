@@ -24,7 +24,12 @@
 set -uo pipefail
 
 # ===================== CONFIG (match your setup) ==========================
-STORAGE_LOCATION="${HOME}/anythingllm"       # AnythingLLM data dir
+# resolve the real (non-root) user even when run via sudo
+RUN_USER="${SUDO_USER:-$USER}"
+REAL_HOME="$(getent passwd "$RUN_USER" 2>/dev/null | cut -d: -f6)"
+[ -z "$REAL_HOME" ] && REAL_HOME="$HOME"
+
+STORAGE_LOCATION="${STORAGE_LOCATION:-$REAL_HOME/anythingllm}"   # AnythingLLM data dir
 OPENWEBUI_VOLUME="open-webui"                # docker named volume
 OPENWEBUI_CONTAINER="open-webui"
 ANYTHINGLLM_CONTAINER="anythingllm"
@@ -145,15 +150,18 @@ if [ "$KEEP_OLLAMA" -eq 0 ]; then
   sudo systemctl daemon-reload 2>/dev/null || true
   ok "removed systemd unit and override"
 
+  # also stop any manual instance
+  sudo pkill -f "ollama serve" 2>/dev/null || true
+
   # remove binary (official installer drops it in /usr/local/bin or /usr/bin)
   for bin in /usr/local/bin/ollama /usr/bin/ollama; do
     [ -e "$bin" ] && sudo rm -f "$bin" && ok "removed $bin"
   done
 
-  # remove the ollama service user's home / model store if purging
+  # remove the model store if purging
   if [ "$PURGE_DATA" -eq 1 ]; then
     sudo rm -rf /usr/share/ollama/.ollama 2>/dev/null && ok "removed /usr/share/ollama model store" || true
-    rm -rf "$HOME/.ollama" 2>/dev/null && ok "removed ~/.ollama" || true
+    sudo rm -rf "$REAL_HOME/.ollama" 2>/dev/null && ok "removed ${REAL_HOME}/.ollama" || true
   else
     warn "kept model store (pulled models). Use --purge-data to delete."
   fi
