@@ -32,7 +32,9 @@ works), or via environment variables which override those defaults:
                   describe its figures/plots, and upload those descriptions as a
                   companion doc (so plots become retrievable). = --describe-figures.
                   Needs PyMuPDF (pip install pymupdf) + a vision model in Ollama.
-  RAG_FIGURE_MODEL  vision model tag (default: llama3.2-vision)
+  RAG_FIGURE_MODEL  vision model tag (default: llava). NOTE: the DGX Spark's
+                  custom Ollama build does NOT support the 'mllama' architecture,
+                  so llama3.2-vision will not load there; llava does.
   RAG_OLLAMA_URL    Ollama base URL for figure calls (default: http://localhost:11434)
   RAG_FIGURE_DPI    page render DPI for the vision model (default: 150)
 
@@ -112,7 +114,7 @@ OCR_FALLBACK = ("--ocr-fallback" in sys.argv) or (os.environ.get("RAG_OCR_FALLBA
 # "see" plots; this bridges that gap. Enabled by --describe-figures / RAG_DESCRIBE_FIGURES=1.
 # Requires PyMuPDF (pip install pymupdf) and a vision model pulled in Ollama.
 DESCRIBE_FIGURES = ("--describe-figures" in sys.argv) or (os.environ.get("RAG_DESCRIBE_FIGURES", "").lower() in ("1", "true", "yes"))
-FIGURE_MODEL = os.environ.get("RAG_FIGURE_MODEL", "llama3.2-vision")   # Meta vision model
+FIGURE_MODEL = os.environ.get("RAG_FIGURE_MODEL", "llava")   # vision model (Western; loads on the Spark's Ollama build)
 OLLAMA_URL   = os.environ.get("RAG_OLLAMA_URL", "http://localhost:11434")
 FIGURE_DPI   = int(os.environ.get("RAG_FIGURE_DPI", "150"))
 

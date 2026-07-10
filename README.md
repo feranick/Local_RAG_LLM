@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.10.3**
+**Version 2026.07.10.4**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -224,21 +224,23 @@ RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 
 ### Making figures/plots retrievable (`--describe-figures`)
 
-Text-only RAG can't "see" plots — the data locked in figures is invisible to retrieval. `--describe-figures` bridges that: for each PDF it renders every page, has a **local vision model** (Meta's Llama 3.2 Vision, via Ollama) describe any figures/plots/charts (caption, axes, series, trends, legible values), and uploads those descriptions as a companion document so they're retrievable alongside the text, with citations.
+Text-only RAG can't "see" plots — the data locked in figures is invisible to retrieval. `--describe-figures` bridges that: for each PDF it renders every page, has a **local vision model** (LLaVA, via Ollama) describe any figures/plots/charts (caption, axes, series, trends, legible values), and uploads those descriptions as a companion document so they're retrievable alongside the text, with citations.
 
 One-time setup:
 
 ```bash
-ollama pull llama3.2-vision       # the vision model (Meta; ~8 GB)
+ollama pull llava                 # the vision model (~5 GB)
 pip install pymupdf               # renders PDF pages to images
 ```
 
 Then:
 
 ```bash
-python3 sync_folder.py --describe-figures            # combines with --prune / --ocr-fallback
-RAG_FIGURE_MODEL=llama3.2-vision:90b python3 sync_folder.py --describe-figures   # larger model
+python3 sync_folder.py --describe-figures            # combines with --prune / --ocr-fallback / --force
+RAG_FIGURE_MODEL=llava:13b python3 sync_folder.py --describe-figures   # larger LLaVA variant
 ```
+
+> **Vision model note (DGX Spark).** The default is **`llava`**, not Llama 3.2 Vision. The Spark's custom Blackwell-optimized Ollama build does **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model that this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
 
 The companion doc is tracked with its source file: re-syncing a changed PDF regenerates it, and `--prune` removes it when the source is deleted.
 
