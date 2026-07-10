@@ -226,7 +226,14 @@ def main():
             remote_id = add_fn(session, p)
             files[key] = {"hash": digest, "remote_id": remote_id}
         except requests.HTTPError as e:
-            print(f"[sync]   failed ({e}) — check API key / endpoint / target")
+            detail = ""
+            try:
+                detail = (e.response.text or "")[:400]
+            except Exception:
+                pass
+            print(f"[sync]   failed ({e})")
+            if detail:
+                print(f"[sync]   server said: {detail}")
 
     # --- prune files deleted from the folder ---
     if PRUNE:
@@ -238,7 +245,12 @@ def main():
                 del files[key]
                 removed += 1
             except requests.HTTPError as e:
-                print(f"[sync]   remove failed ({e})")
+                detail = ""
+                try:
+                    detail = (e.response.text or "")[:400]
+                except Exception:
+                    pass
+                print(f"[sync]   remove failed ({e}) {('- ' + detail) if detail else ''}")
     else:
         stale = [k for k in files if k not in on_disk]
         if stale:
