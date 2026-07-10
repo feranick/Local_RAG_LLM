@@ -131,28 +131,59 @@ By default it only *adds/updates* — deleting a file from the folder leaves it 
 
 **Create the collection first.** Open WebUI/AnythingLLM won't auto-create it — make the Knowledge collection (Open WebUI: **Workspace → Knowledge → + New Knowledge**) or workspace *before* syncing, and point `RAG_TARGET` at its id. If you sync to a non-existent target, files upload but land in no collection and `#` shows nothing.
 
-Set your defaults once in the CONFIG block at the top of `sync_folder.py` (`BACKEND`, `WATCH_DIR`, `TARGET`), store the API key in a protected file, and then a bare run just works:
+### Configuring the script
 
-```bash
-pip install requests
-echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key   # one-time; keeps the key out of the script
+There are four settings. Three live in the **CONFIG block at the top of `sync_folder.py`**; the API key is kept in a separate file. Any matching environment variable overrides the in-file value.
 
-python3 sync_folder.py            # add/update only
-python3 sync_folder.py --prune    # full mirror (also deletes)
+| Setting | In-file variable | Where the value comes from |
+|---------|------------------|----------------------------|
+| Backend | `BACKEND` | `"openwebui"` or `"anythingllm"` |
+| Folder to sync | `WATCH_DIR` | a path — defaults to `~/papers` (see path note below) |
+| Target collection | `TARGET` | the collection id / workspace slug (see "Finding the id" below) |
+| API key | (not in the file) | `~/.rag_sync_key` (see "Finding the API key" below) |
+
+**Editing paths (`WATCH_DIR`) — important:** this is Python, so do **not** use `$HOME` (Python won't expand it) and do **not** rename the variable to `RAG_WATCH_DIR` (that's only the env-var name it falls back to). The default already points at `~/papers`, so you usually don't touch it. To hardcode a different folder, change only the fallback path using a full path or `pathlib.Path.home()`:
+
+```python
+# default — leave as-is for ~/papers:
+WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", str(pathlib.Path.home() / "papers")))
+
+# or hardcode an absolute path:
+WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", "/home/feranick/research/papers"))
 ```
 
-Environment variables still override the in-file defaults if you prefer passing them per-run:
+**Finding the API key (`RAG_API_KEY`):**
+
+- **Open WebUI:** first enable it — **Admin Panel → Settings → Authentication → Enable API Key** (Save). Then create it — your **avatar → Settings → Account**, scroll to the bottom, create a key (starts with `sk-`). In v0.10.x the enable toggle is under Authentication, *not* General.
+- **AnythingLLM:** **Settings → Tools → Developer API**.
+
+Store it once in the key file (keeps the secret out of the script and out of cron):
+
+```bash
+echo 'sk-your-key-here' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key
+```
+
+**Finding the target id (`RAG_TARGET`):**
+
+- **Open WebUI:** the knowledge collection id is the last part of its URL — open the collection under **Workspace → Knowledge** and copy the `...` from `.../knowledge/<this-id>`.
+- **AnythingLLM:** the workspace **slug** (the URL-safe name in the workspace's address).
+
+The collection/workspace must already exist and contain (or be about to receive) documents — the script uploads *into* it, it does not create it.
+
+### Running it
+
+```bash
+pip install requests            # one-time dependency
+
+python3 sync_folder.py          # add/update only
+python3 sync_folder.py --prune  # full mirror (also removes deleted files)
+```
+
+Environment variables override the in-file defaults for a one-off run:
 
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 ```
-
-Getting the Open WebUI API key takes two steps:
-
-1. **Enable the feature:** Admin Panel → Settings → **Authentication** → turn on **Enable API Key** (Save). In v0.10.x this toggle lives under Authentication, not General.
-2. **Create the key:** your user **Settings → Account**, scroll to the bottom, create a key (starts with `sk-`), and paste that into the script as `RAG_API_KEY`.
-
-The knowledge collection id is the last part of the collection's URL: `.../knowledge/<this-id>`.
 
 Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the collection mirrored to the folder). With your defaults in the script and the key in `~/.rag_sync_key`, the cron line stays clean:
 
