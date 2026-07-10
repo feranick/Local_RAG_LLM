@@ -16,8 +16,12 @@ OLLAMA_URL="http://localhost:11434"
 OPENWEBUI_URL="http://localhost:3000"
 ANYTHINGLLM_URL="http://localhost:3001"
 TEST_MODEL="gemma4:26b"        # model used for the generation test
+EMBED_MODEL="nomic-embed-text" # embedding model required for RAG
 OPENWEBUI_CONTAINER="open-webui"
 ANYTHINGLLM_CONTAINER="anythingllm"
+# optional add-ons (only reported if present)
+TIKA_CONTAINER="tika"
+VISION_CONTAINER="ollama-vision"
 # ---------------------------------------------------
 
 GREEN=$'\e[32m'; RED=$'\e[31m'; YELLOW=$'\e[33m'; BOLD=$'\e[1m'; RESET=$'\e[0m'
@@ -59,6 +63,13 @@ if [ -n "$MODELS" ]; then
   echo "$MODELS" | grep -o '"name":"[^"]*"' | sed 's/"name":"/      - /; s/"$//'
 else
   bad "Could not list Ollama models"
+fi
+
+# embedding model is required for RAG (documents can't be embedded without it)
+if echo "$MODELS" | grep -q "\"${EMBED_MODEL}"; then
+  ok "embedding model '$EMBED_MODEL' present (required for RAG)"
+else
+  bad "embedding model '$EMBED_MODEL' missing — RAG uploads will fail (ollama pull $EMBED_MODEL)"
 fi
 
 # -----------------------------------------------------------------
@@ -155,6 +166,26 @@ for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER"; do
     * ) warn "$c restart policy: $POL  (won't auto-start on reboot)" ;;
   esac
 done
+
+# -----------------------------------------------------------------
+head "7. Optional add-ons (informational)"
+# these are only present if you enabled Tika extraction or a containerized
+# vision model; report status without affecting pass/fail.
+found_addon=0
+for c in "$TIKA_CONTAINER" "$VISION_CONTAINER"; do
+  ST=$($DOCKER inspect -f '{{.State.Status}}' "$c" 2>/dev/null)
+  if [ -n "$ST" ]; then
+    found_addon=1
+    [ "$ST" = "running" ] && ok "add-on '$c' is running" \
+                          || warn "add-on '$c' present but $ST"
+  fi
+done
+# a vision model (for --describe-figures) present on the host Ollama?
+if echo "$MODELS" | grep -qiE '"(llava|moondream|bakllava)'; then
+  ok "a vision model is available (for --describe-figures)"
+  found_addon=1
+fi
+[ "$found_addon" -eq 0 ] && warn "no optional add-ons detected (Tika / vision) — fine if unused"
 
 # -----------------------------------------------------------------
 echo

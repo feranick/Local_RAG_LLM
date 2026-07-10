@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.10.5**
+**Version 2026.07.10.7**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -22,7 +22,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | File | What it does |
 |------|--------------|
 | `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
-| `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, a live generation test, both containers, container→Ollama connectivity, and reboot-safe restart policies. |
+| `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, the embedding model, a live generation test, both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). |
 | `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, mirrors deletions (`--prune`), re-syncs on demand (`--force`), auto-OCRs text-less PDFs (`--ocr-fallback`), and describes figures in PDFs and standalone images via a vision model (`--describe-figures`). |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
@@ -240,7 +240,7 @@ python3 sync_folder.py --describe-figures            # combines with --prune / -
 RAG_FIGURE_MODEL=llava:13b python3 sync_folder.py --describe-figures   # larger LLaVA variant
 ```
 
-This also indexes **standalone image files** in the folder — `.png`, `.jpg/.jpeg`, `.tif/.tiff`, `.webp`, `.bmp`, `.gif`. With `--describe-figures`, each image is described by the vision model and its description uploaded as a text document, so loose figures/screenshots/plots become retrievable too (they're skipped without the flag, since a raw image has no extractable text). Because a standalone image usually has no caption, the script also **passes the file name to the vision model as context** — so a descriptive name like `voltivity_resistivity_vs_temp.png` genuinely improves the description. Tracking, `--force`, and `--prune` all apply to images the same as documents.
+This also indexes **standalone image files** in the folder — `.png`, `.jpg/.jpeg`, `.tif/.tiff`, `.webp`, `.bmp`, `.gif`. With `--describe-figures`, each image is described by the vision model and its description uploaded as a text document, so loose figures/screenshots/plots become retrievable too (they're skipped without the flag, since a raw image has no extractable text). Because a standalone image usually has no caption, the script also **passes the file name to the vision model as context** — so a descriptive name like `voltivity_resistivity_vs_temp.png` genuinely improves the description. If a **sidecar text file** with the same basename sits next to the image (`figure1.png` + `figure1.txt`, or `figure1.png.txt`; also `.md`/`.caption`/`.json`), its contents are fed in as extra context too — handy when you export figures with metadata. Tracking, `--force`, and `--prune` all apply to images the same as documents.
 
 > **Vision model note (DGX Spark).** The default is **`llava`**, not Llama 3.2 Vision. The Spark's custom Blackwell-optimized Ollama build does **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model that this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
 
@@ -297,6 +297,8 @@ To test the setup script from a clean system:
 
 - **True fresh test:** `./uninstall_local_rag.sh --purge-data` then `./setup_local_rag.sh`. Note this re-downloads the models (~17 GB for `gemma4:26b` + `nomic-embed-text`).
 - **Fast iteration:** `./uninstall_local_rag.sh` (no purge) keeps the models on disk, so the re-run reuses them.
+
+The uninstaller also removes the optional add-ons if you set them up: the Tika container, the containerized vision Ollama (`ollama-vision`), the shared `rag-net` network, and (with `--purge-data`) its volume and the sync artifacts (`~/.rag_sync_state.json`, `~/.rag_sync_key`).
 
 Docker and the NVIDIA Container Toolkit are never removed — they ship with DGX OS and other apps rely on them.
 

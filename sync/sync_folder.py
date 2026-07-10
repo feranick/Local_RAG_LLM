@@ -294,6 +294,28 @@ def _vlm_describe(session, png_b64, prompt):
     return r.json().get("response", "").strip()
 
 
+# sidecar text files that may sit next to an image and hold its caption/metadata
+SIDECAR_EXTS = (".txt", ".md", ".caption", ".json")
+
+
+def find_sidecar_text(img_path):
+    """Return (text, name) from a sidecar file sharing the image's basename, e.g.
+    figure1.png + figure1.txt  OR  figure1.png.txt. Empty strings if none."""
+    candidates = []
+    for e in SIDECAR_EXTS:
+        candidates.append(img_path.with_suffix(e))                  # figure1.txt
+        candidates.append(img_path.parent / (img_path.name + e))    # figure1.png.txt
+    for c in candidates:
+        if c.is_file():
+            try:
+                txt = c.read_text(errors="ignore").strip()
+                if txt:
+                    return txt[:4000], c.name
+            except Exception:
+                pass
+    return "", ""
+
+
 def build_figures_doc(session, pdf_path):
     """Render each page of a PDF and have the vision model describe any figures.
     Writes the descriptions to a temp .md file. Returns (md_path, n_pages_with_figures)
@@ -378,6 +400,13 @@ def build_image_doc(session, img_path):
                   f"\"{img_path.name}\", which often hints at its subject or the "
                   f"quantities shown. Use it as a clue where relevant, but do not "
                   f"contradict what you actually see in the image.")
+        # if a sidecar text/caption file sits next to the image, add it as context
+        sidecar, sc_name = find_sidecar_text(img_path)
+        if sidecar:
+            print(f"[sync]   using sidecar context from {sc_name}")
+            prompt += (f"\n\nAdditional context from an accompanying file "
+                       f"(\"{sc_name}\"):\n{sidecar}\n\nUse it to inform your "
+                       f"description where relevant.")
         desc = _vlm_describe(session, b64, prompt)
     except requests.HTTPError as e:
         print(f"[sync]   vision model call failed ({e}). Is '{FIGURE_MODEL}' pulled? "

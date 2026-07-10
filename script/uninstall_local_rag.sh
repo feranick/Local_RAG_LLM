@@ -5,12 +5,14 @@
 # Removes the local RAG stack created by setup_local_rag.sh:
 #   - Open WebUI container   (+ its data volume, only with --purge-data)
 #   - AnythingLLM container  (+ its storage dir, only with --purge-data)
+#   - Optional add-ons if present: Tika container, containerized vision Ollama
+#     (ollama-vision), the shared rag-net network, and its volume (on --purge-data)
 #   - Ollama service, systemd override, binary, and models
 #
 # SAFE BY DEFAULT:
 #   * Removes containers and the Ollama software.
-#   * KEEPS your data (Open WebUI volume, AnythingLLM storage, pulled models)
-#     unless you pass --purge-data.
+#   * KEEPS your data (Open WebUI volume, AnythingLLM storage, pulled models,
+#     sync state/key files) unless you pass --purge-data.
 #   * Prompts for confirmation before doing anything (skip with --yes).
 #
 # Usage:
@@ -33,6 +35,14 @@ STORAGE_LOCATION="${STORAGE_LOCATION:-$REAL_HOME/anythingllm}"   # AnythingLLM d
 OPENWEBUI_VOLUME="open-webui"                # docker named volume
 OPENWEBUI_CONTAINER="open-webui"
 ANYTHINGLLM_CONTAINER="anythingllm"
+# optional add-ons (removed if present): Tika extraction, containerized vision Ollama
+TIKA_CONTAINER="tika"
+VISION_CONTAINER="ollama-vision"
+VISION_VOLUME="ollama_vision"
+RAG_NETWORK="rag-net"
+# sync_folder.py artifacts (removed on --purge-data)
+SYNC_STATE="$REAL_HOME/.rag_sync_state.json"
+SYNC_KEY="$REAL_HOME/.rag_sync_key"
 # ==========================================================================
 
 PURGE_DATA=0
@@ -98,30 +108,43 @@ fi
 # --------------------------------------------------------------------------
 step "Removing containers"
 if [ -n "$DOCKER" ]; then
-  for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER"; do
+  # core containers, plus optional add-ons if the user set them up
+  for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER" "$TIKA_CONTAINER" "$VISION_CONTAINER"; do
     if [ -n "$($DOCKER ps -aq -f "name=^/${c}$")" ]; then
       $DOCKER rm -f "$c" >/dev/null && ok "removed container '$c'"
     else
-      warn "container '$c' not found (already gone)"
+      warn "container '$c' not found (skipping)"
     fi
   done
+  # the shared network is only present if Tika/vision add-ons were used
+  if $DOCKER network inspect "$RAG_NETWORK" >/dev/null 2>&1; then
+    $DOCKER network rm "$RAG_NETWORK" >/dev/null 2>&1 && ok "removed network '$RAG_NETWORK'" \
+      || warn "network '$RAG_NETWORK' still in use — left in place"
+  fi
 else
   warn "skipped (docker unavailable)"
 fi
 
 # --------------------------------------------------------------------------
-if [ "$PURGE_DATA" -eq 1 ] && [ -n "$DOCKER" ]; then
+if [ "$PURGE_DATA" -eq 1 ]; then
   step "Deleting data (--purge-data)"
-  if $DOCKER volume inspect "$OPENWEBUI_VOLUME" >/dev/null 2>&1; then
-    $DOCKER volume rm "$OPENWEBUI_VOLUME" >/dev/null && ok "removed volume '$OPENWEBUI_VOLUME'"
-  else
-    warn "volume '$OPENWEBUI_VOLUME' not found"
+  if [ -n "$DOCKER" ]; then
+    for v in "$OPENWEBUI_VOLUME" "$VISION_VOLUME"; do
+      if $DOCKER volume inspect "$v" >/dev/null 2>&1; then
+        $DOCKER volume rm "$v" >/dev/null 2>&1 && ok "removed volume '$v'" \
+          || warn "volume '$v' in use — left in place"
+      fi
+    done
   fi
   if [ -d "$STORAGE_LOCATION" ]; then
     sudo rm -rf "$STORAGE_LOCATION" && ok "deleted '$STORAGE_LOCATION'"
   else
     warn "'$STORAGE_LOCATION' not found"
   fi
+  # sync_folder.py artifacts
+  for f in "$SYNC_STATE" "$SYNC_KEY"; do
+    [ -f "$f" ] && rm -f "$f" && ok "removed $f"
+  done
 fi
 
 # --------------------------------------------------------------------------
