@@ -77,6 +77,14 @@ You can also edit the `CONFIG` block at the top of the script (ports, storage pa
 
 The scripts stand up the services; the last mile is done once in each web UI.
 
+> **Accessing a remote Spark (connecting by IP, not sitting at the machine).**
+> There are two different kinds of address below, and only one changes when you're remote:
+>
+> - **Browser URLs** (`http://localhost:3000`, `http://localhost:3001`) — how *you* reach the web UIs. From another machine, replace `localhost` with the Spark's address: `http://<spark-ip>:3000` and `http://<spark-ip>:3001`. (Or keep using `localhost` over an SSH tunnel — see [Ports](#ports).)
+> - **The Ollama base URL you type *inside* a UI** (`http://host.docker.internal:11434`) — this is a **container → host** address, i.e. the container reaching Ollama running on the Spark. It has nothing to do with how your browser connects, so **leave it exactly as `http://host.docker.internal:11434`** whether you're local or remote. Do *not* change it to the Spark's IP.
+>
+> So when the steps below say `localhost:3001`, read it as "the Spark's IP on port 3001" if you're remote — but every `host.docker.internal` stays verbatim.
+
 ### AnythingLLM — `http://localhost:3001`
 
 1. Onboarding wizard:
@@ -156,7 +164,12 @@ Docker and the NVIDIA Container Toolkit are never removed — they ship with DGX
 | Open WebUI | `http://localhost:3000` | 3000 |
 | AnythingLLM | `http://localhost:3001` | 3001 |
 
-To reach a UI from your laptop, SSH-tunnel: `ssh -L 3001:localhost:3001 user@spark`.
+To reach a UI from another machine you have two options:
+
+- **Direct by IP:** browse to `http://<spark-ip>:3000` / `:3001`. The containers already publish on `0.0.0.0`, so this works as long as your network/firewall allows those ports. Since Open WebUI and AnythingLLM accounts are served over plain HTTP, only do this on a trusted network.
+- **SSH tunnel (more secure):** `ssh -L 3000:localhost:3000 -L 3001:localhost:3001 user@<spark-ip>`, then browse to `http://localhost:3000` on your laptop as if it were local.
+
+Either way, the in-UI Ollama base URL stays `http://host.docker.internal:11434` — see the note under [One-time UI configuration](#one-time-ui-configuration).
 
 ---
 
