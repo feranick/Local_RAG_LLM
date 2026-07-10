@@ -110,7 +110,11 @@ The scripts stand up the services; the last mile is done once in each web UI.
 
 ## Keeping the knowledge base updated
 
-Neither tool watches a local directory out of the box. `sync_folder.py` closes that gap: it hashes each file, uploads only new/changed ones, and attaches them to your workspace/collection.
+Neither tool watches a local directory out of the box. `sync_folder.py` closes that gap: it hashes each file, uploads only new/changed ones, and attaches them to your workspace/collection. Changed files are re-uploaded cleanly (the old copy is removed first, so no duplicates).
+
+By default it only *adds/updates* — deleting a file from the folder leaves it in the collection. Add `--prune` (or set `RAG_PRUNE=1`) to make it a true **mirror**: files removed from the folder are also removed from the collection, so the folder becomes the single source of truth.
+
+> **Don't mix methods on one collection.** The script tracks what *it* uploaded; documents you add by hand in the GUI are invisible to it. If you both drag files into the GUI and sync the same folder, you'll get duplicates, and `--prune` won't touch the GUI-added ones. Pick one method per collection: either manage documents entirely in the GUI, or entirely via the folder + script.
 
 ```bash
 pip install requests
@@ -123,13 +127,18 @@ RAG_TARGET=papers \
 python3 sync_folder.py
 ```
 
-For Open WebUI, set `RAG_BACKEND=openwebui`, use an API key from **Settings → Account → API Keys**, and set `RAG_TARGET` to the knowledge collection id.
+For Open WebUI, set `RAG_BACKEND=openwebui` and set `RAG_TARGET` to the knowledge collection id. Getting the API key takes two steps:
 
-Run it on a schedule with cron — every 15 minutes:
+1. **Enable the feature:** Admin Panel → Settings → **Authentication** → turn on **Enable API Key** (Save). In v0.10.x this toggle lives under Authentication, not General.
+2. **Create the key:** your user **Settings → Account**, scroll to the bottom, create a key (starts with `sk-`), and paste that into the script as `RAG_API_KEY`.
+
+The knowledge collection id is the last part of the collection's URL: `.../knowledge/<this-id>`.
+
+Run it on a schedule with cron — every 15 minutes (add `--prune` to keep the collection mirrored to the folder):
 
 ```bash
 # crontab -e
-*/15 * * * * RAG_BACKEND=anythingllm RAG_API_KEY=xxxx RAG_WATCH_DIR=$HOME/papers RAG_TARGET=papers /usr/bin/python3 /path/to/sync_folder.py >> $HOME/rag_sync.log 2>&1
+*/15 * * * * RAG_BACKEND=anythingllm RAG_API_KEY=xxxx RAG_WATCH_DIR=$HOME/papers RAG_TARGET=papers /usr/bin/python3 /path/to/sync_folder.py --prune >> $HOME/rag_sync.log 2>&1
 ```
 
 For near-instant updates instead of polling, swap the loop for Python `watchdog` running as a systemd service. AnythingLLM also has built-in **Scheduled Jobs** and a beta **Live Document Sync** you can use instead.
@@ -207,6 +216,9 @@ The AnythingLLM container was launched without `--add-host=host.docker.internal:
 
 **Open WebUI shows an "authorization failure" over the LAN IP.**
 No admin account exists yet, or you're on the login screen without one. Click **Sign up** — the first account becomes admin and works from any address.
+
+**Can't find API Keys in Open WebUI (needed for the sync script).**
+The API Keys section doesn't appear in **Settings → Account** until the feature is enabled by an admin. Go to **Admin Panel → Settings → Authentication** and turn on **Enable API Key** (in v0.10.x it's under Authentication, not General). Then **Settings → Account** shows the section — scroll down, create a key (`sk-...`), and paste it into the sync script as `RAG_API_KEY`. Not needed at all if you upload documents through the UI instead of using the sync script.
 
 **The Embedding Model field in Open WebUI won't populate / stays empty even after refresh.**
 It isn't a dropdown — it's a free-text input. Type the model name in by hand (`nomic-embed-text`, or `nomic-embed-text:latest`) exactly as `ollama list` shows it, then click **Save**. This is expected behavior, not a connection problem — you can confirm the connection is fine with:
