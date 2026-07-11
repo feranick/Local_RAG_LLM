@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.10.7**
+**Version 2026.07.11.2**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -21,8 +21,8 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 
 | File | What it does |
 |------|--------------|
-| `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), pulls models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
-| `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, the embedding model, a live generation test, both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). |
+| `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), interactively selects + pulls the chat/embedding/vision models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
+| `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, mirrors deletions (`--prune`), re-syncs on demand (`--force`), auto-OCRs text-less PDFs (`--ocr-fallback`), and describes figures in PDFs and standalone images via a vision model (`--describe-figures`). |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
@@ -59,16 +59,32 @@ The setup script will, in order:
 5. Launch **Open WebUI** on port 3000 (with `--gpus all` when a GPU test succeeds).
 6. Create AnythingLLM's storage folder with the correct ownership and launch **AnythingLLM** on port 3001.
 
+After pulling, the script **verifies each model actually loads** (a tiny generate/embeddings call), not just that it downloaded — so a model that's pulled but won't run on this Ollama build (like `llama3.2-vision`'s `mllama` architecture) is flagged immediately rather than failing later.
+
 It's safe to re-run: containers are recreated cleanly, while pulled models, Ollama config, and data volumes are preserved. When run with `sudo`, it correctly targets your real home directory (not root's).
 
-### Options
+### Choosing models
+
+When run in a terminal, the script **interactively prompts you to pick the models** — press Enter for the default or type a number / custom tag:
+
+- **Chat model (LLM):** `gemma4:26b` (default, MoE — fast), `gemma4:31b`, `gemma4:12b`, `llama3.3:70b`, `qwen3.6:27b` (dense, higher quality), `qwen3.6:35b` (35B-A3B MoE, faster), or a custom tag.
+- **Embedding model:** `nomic-embed-text` (default), `mxbai-embed-large`, `bge-m3`, or custom.
+- **Vision model (optional, for `--describe-figures`):** `llava` (default — loads on the Spark), `moondream`, `bakllava`, `none`, or custom.
+
+(Note: `qwen3.6` is an Alibaba model — listed for completeness; it and other Chinese models are your call. For vision, avoid `llama3.2-vision` on the Spark — its `mllama` architecture won't load on this build; `llava` works.)
+
+### Options / non-interactive
+
+Pass any model explicitly (skips that prompt), or `--no-prompt` to skip all menus — useful for automation:
 
 ```bash
-./setup_local_rag.sh --chat-model llama3.3:70b   # use a different chat model
-./setup_local_rag.sh --embed-model bge-m3         # multilingual / long-context embeddings
-./setup_local_rag.sh --skip-openwebui             # AnythingLLM only
-./setup_local_rag.sh --skip-anythingllm           # Open WebUI only
-./setup_local_rag.sh --skip-models                # don't pull models
+./setup_local_rag.sh --chat-model llama3.3:70b    # use a different chat model
+./setup_local_rag.sh --embed-model bge-m3          # multilingual / long-context embeddings
+./setup_local_rag.sh --vision-model llava          # also pull a vision model for figures/images
+./setup_local_rag.sh --no-prompt                   # accept defaults, no menus (automation)
+./setup_local_rag.sh --skip-openwebui              # AnythingLLM only
+./setup_local_rag.sh --skip-anythingllm            # Open WebUI only
+./setup_local_rag.sh --skip-models                 # don't pull models
 ```
 
 You can also edit the `CONFIG` block at the top of the script (ports, storage path, model names).

@@ -19,6 +19,13 @@
 #   ./setup_local_rag.sh --skip-openwebui
 #   ./setup_local_rag.sh --skip-anythingllm
 #   ./setup_local_rag.sh --chat-model llama3.3:70b
+#   ./setup_local_rag.sh --vision-model llava     # also pull a vision model
+#   ./setup_local_rag.sh --no-prompt              # skip interactive model menus
+#
+# When run in a terminal it interactively prompts you to choose the chat,
+# embedding, and (optional) vision models, with sensible defaults. Pass the
+# --chat-model / --embed-model / --vision-model flags or --no-prompt to skip
+# the menus (e.g. for automation).
 #
 # If your user needs sudo for docker, the script auto-detects and uses it.
 # --------------------------------------------------------------------------
@@ -28,6 +35,7 @@ set -euo pipefail
 # ===================== CONFIG (edit as needed) ============================
 CHAT_MODEL="gemma4:26b"           # main chat/generation model
 EMBED_MODEL="nomic-embed-text"    # embedding model — REQUIRED for RAG
+VISION_MODEL=""                   # optional vision model for figure/image descriptions (pulled if set)
 OLLAMA_PORT=11434
 OPENWEBUI_PORT=3000
 ANYTHINGLLM_PORT=3001
@@ -35,13 +43,17 @@ STORAGE_LOCATION=""              # AnythingLLM data dir (blank = <real-user-home
 INSTALL_OPENWEBUI=1
 INSTALL_ANYTHINGLLM=1
 PULL_MODELS=1
+INTERACTIVE=1                     # prompt to choose models in a terminal (disable with --no-prompt)
 # ==========================================================================
 
 # ---- args ----
+CHAT_SET=0; EMBED_SET=0           # track whether a model was set explicitly on the CLI
 while [ $# -gt 0 ]; do
   case "$1" in
-    --chat-model)      CHAT_MODEL="$2"; shift 2 ;;
-    --embed-model)     EMBED_MODEL="$2"; shift 2 ;;
+    --chat-model)      CHAT_MODEL="$2"; CHAT_SET=1; shift 2 ;;
+    --embed-model)     EMBED_MODEL="$2"; EMBED_SET=1; shift 2 ;;
+    --vision-model)    VISION_MODEL="$2"; shift 2 ;;
+    --no-prompt)       INTERACTIVE=0; shift ;;
     --skip-openwebui)  INSTALL_OPENWEBUI=0; shift ;;
     --skip-anythingllm) INSTALL_ANYTHINGLLM=0; shift ;;
     --skip-models)     PULL_MODELS=0; shift ;;
@@ -65,6 +77,31 @@ ok()   { echo "  ${GREEN}✔${RESET} $1"; }
 warn() { echo "  ${YELLOW}!${RESET} $1"; }
 die()  { echo "  ${RED}x $1${RESET}"; exit 1; }
 
+# pick_model VARNAME "label" "default" opt1 opt2 ...  — interactive chooser
+pick_model() {
+  local __var="$1" label="$2" def="$3"
+  shift 3
+  local opts=("$@")
+  local i=1 o ans custom result="$def"
+  echo
+  echo "${BOLD}Select ${label}${RESET}"
+  for o in "${opts[@]}"; do echo "  $i) $o"; i=$((i+1)); done
+  echo "  c) enter a custom tag"
+  printf "Choice [Enter = keep default: %s]: " "$def"
+  read -r ans || ans=""
+  if [ -z "$ans" ]; then
+    result="$def"
+  elif [ "$ans" = c ] || [ "$ans" = C ]; then
+    printf "  model tag: "; read -r custom || custom=""
+    [ -n "$custom" ] && result="$custom"
+  elif printf '%s' "$ans" | grep -qE '^[0-9]+$' && [ "$ans" -ge 1 ] 2>/dev/null && [ "$ans" -le "${#opts[@]}" ] 2>/dev/null; then
+    result="${opts[$((ans-1))]}"
+  else
+    echo "  (unrecognized '$ans' — keeping default: $def)"
+  fi
+  printf -v "$__var" '%s' "$result"
+}
+
 # ---- docker: use sudo automatically if needed ----
 DOCKER="docker"
 if ! docker info >/dev/null 2>&1; then
@@ -74,6 +111,22 @@ if ! docker info >/dev/null 2>&1; then
   else
     die "Docker not available. Install Docker / start the daemon and retry."
   fi
+fi
+
+# --------------------------------------------------------------------------
+# Interactive model selection (only in a terminal, unless --no-prompt / flags).
+if [ "$INTERACTIVE" -eq 1 ] && [ -t 0 ]; then
+  step "Model selection (press Enter to accept the default)"
+  [ "$CHAT_SET" -eq 0 ] && pick_model CHAT_MODEL "chat model (LLM)" "$CHAT_MODEL" \
+      gemma4:26b gemma4:31b gemma4:12b llama3.3:70b qwen3.6:27b qwen3.6:35b
+  [ "$EMBED_SET" -eq 0 ] && pick_model EMBED_MODEL "embedding model (required for RAG)" "$EMBED_MODEL" \
+      nomic-embed-text mxbai-embed-large bge-m3
+  pick_model VISION_MODEL "vision model for figure/image descriptions (optional)" "${VISION_MODEL:-llava}" \
+      llava moondream bakllava none
+  [ "$VISION_MODEL" = "none" ] && VISION_MODEL=""
+  ok "selected: chat=${CHAT_MODEL}  embed=${EMBED_MODEL}  vision=${VISION_MODEL:-<none>}"
+elif [ "$INTERACTIVE" -eq 0 ]; then
+  warn "non-interactive (--no-prompt): chat=${CHAT_MODEL} embed=${EMBED_MODEL} vision=${VISION_MODEL:-<none>}"
 fi
 
 # --------------------------------------------------------------------------
@@ -152,13 +205,36 @@ done
 # --------------------------------------------------------------------------
 step "4/6  Pull models"
 if [ "$PULL_MODELS" -eq 1 ]; then
-  for m in "$CHAT_MODEL" "$EMBED_MODEL"; do
+  MODELS_TO_PULL=("$CHAT_MODEL" "$EMBED_MODEL")
+  [ -n "$VISION_MODEL" ] && MODELS_TO_PULL+=("$VISION_MODEL")
+  for m in "${MODELS_TO_PULL[@]}"; do
     if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$m"; then
       ok "$m already present"
     else
       warn "pulling $m (this can take a while)…"
       ollama pull "$m"
       ok "$m pulled"
+    fi
+  done
+
+  # verify each model actually LOADS — pulling is not the same as running.
+  # this catches "pulled but unsupported architecture" (e.g. mllama on this build).
+  step "4b/6  Verify models load"
+  for m in "${MODELS_TO_PULL[@]}"; do
+    if [ "$m" = "$EMBED_MODEL" ]; then
+      if curl -fsS --max-time 120 "http://localhost:${OLLAMA_PORT}/api/embeddings" \
+           -d "{\"model\":\"$m\",\"prompt\":\"test\"}" 2>/dev/null | grep -q '"embedding"'; then
+        ok "$m loads (embeddings OK)"
+      else
+        warn "$m did NOT return an embedding — it may not load on this build (check: journalctl -u ollama)"
+      fi
+    else
+      if curl -fsS --max-time 180 "http://localhost:${OLLAMA_PORT}/api/generate" \
+           -d "{\"model\":\"$m\",\"prompt\":\"hi\",\"stream\":false}" 2>/dev/null | grep -q '"response"'; then
+        ok "$m loads (generation OK)"
+      else
+        warn "$m did NOT load — likely unsupported on this Ollama build; check 'journalctl -u ollama' (e.g. 'unknown model architecture')"
+      fi
     fi
   done
 else
@@ -232,6 +308,9 @@ Stack is up. Next steps (one-time, in each web UI):
     - Embedding = Ollama / ${EMBED_MODEL}
     - Vector DB = LanceDB (default)
     - create a workspace, upload docs, Save & Embed
+
+Models: chat=${CHAT_MODEL}  embed=${EMBED_MODEL}  vision=${VISION_MODEL:-<none>}
+$( [ -n "$VISION_MODEL" ] && echo "  (use the vision model for plots/images:  RAG_FIGURE_MODEL=${VISION_MODEL} python3 sync_folder.py --describe-figures)" )
 
 Verify everything with:  ./llm_stack_healthcheck.sh
 Auto-sync a folder with:  see sync_folder.py + README.md

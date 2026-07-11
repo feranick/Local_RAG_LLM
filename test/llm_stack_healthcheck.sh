@@ -15,8 +15,8 @@ set -u
 OLLAMA_URL="http://localhost:11434"
 OPENWEBUI_URL="http://localhost:3000"
 ANYTHINGLLM_URL="http://localhost:3001"
-TEST_MODEL="gemma4:26b"        # model used for the generation test
-EMBED_MODEL="nomic-embed-text" # embedding model required for RAG
+TEST_MODEL="${RAG_TEST_MODEL:-gemma4:26b}"   # preferred model for the generation test
+                                             # (auto-falls back to any installed chat model)
 OPENWEBUI_CONTAINER="open-webui"
 ANYTHINGLLM_CONTAINER="anythingllm"
 # optional add-ons (only reported if present)
@@ -57,19 +57,25 @@ else
 fi
 
 MODELS=$(curl -fsS --max-time 5 "$OLLAMA_URL/api/tags" 2>/dev/null)
-if [ -n "$MODELS" ]; then
-  COUNT=$(echo "$MODELS" | grep -o '"name"' | wc -l | tr -d ' ')
+MODEL_NAMES=$(echo "$MODELS" | grep -o '"name":"[^"]*"' | sed 's/"name":"//; s/"$//')
+if [ -n "$MODEL_NAMES" ]; then
+  COUNT=$(echo "$MODEL_NAMES" | grep -c . )
   ok "Ollama reports $COUNT model(s) installed"
-  echo "$MODELS" | grep -o '"name":"[^"]*"' | sed 's/"name":"/      - /; s/"$//'
+  echo "$MODEL_NAMES" | sed 's/^/      - /'
 else
   bad "Could not list Ollama models"
 fi
 
-# embedding model is required for RAG (documents can't be embedded without it)
-if echo "$MODELS" | grep -q "\"${EMBED_MODEL}"; then
-  ok "embedding model '$EMBED_MODEL' present (required for RAG)"
+# name patterns used to classify models (so the check works for any selection)
+EMBED_PAT='embed|bge|nomic|arctic|minilm'
+VISION_PAT='llava|moondream|bakllava|vision|vl|-vl'
+
+# an embedding model of SOME kind is required for RAG (not a specific one)
+if echo "$MODEL_NAMES" | grep -qiE "$EMBED_PAT"; then
+  EMB=$(echo "$MODEL_NAMES" | grep -iE "$EMBED_PAT" | head -1)
+  ok "embedding model present ($EMB) — required for RAG"
 else
-  bad "embedding model '$EMBED_MODEL' missing — RAG uploads will fail (ollama pull $EMBED_MODEL)"
+  bad "no embedding model found — RAG uploads will fail (e.g. ollama pull nomic-embed-text)"
 fi
 
 # -----------------------------------------------------------------
@@ -90,27 +96,36 @@ else
 fi
 
 # -----------------------------------------------------------------
-head "3. Generation test ($TEST_MODEL)"
+# Pick which model to test: the preferred one if installed, else auto-fall back
+# to any installed chat model (excluding embedding/vision models).
+GEN_MODEL=""
+if echo "$MODEL_NAMES" | grep -qx "$TEST_MODEL"; then
+  GEN_MODEL="$TEST_MODEL"
+else
+  GEN_MODEL=$(echo "$MODEL_NAMES" | grep -viE "$EMBED_PAT|$VISION_PAT" | head -1)
+fi
 
-if echo "$MODELS" | grep -q "\"$TEST_MODEL\""; then
-  REQ="{\"model\":\"$TEST_MODEL\",\"prompt\":\"Reply with exactly one word: OK\",\"stream\":false}"
+head "3. Generation test (${GEN_MODEL:-none available})"
+
+if [ -n "$GEN_MODEL" ]; then
+  [ "$GEN_MODEL" != "$TEST_MODEL" ] && warn "preferred '$TEST_MODEL' not installed — testing '$GEN_MODEL' instead"
+  REQ="{\"model\":\"$GEN_MODEL\",\"prompt\":\"Reply with exactly one word: OK\",\"stream\":false}"
   START=$(date +%s)
-  RESP=$(curl -fsS --max-time 120 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)
+  RESP=$(curl -fsS --max-time 180 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)
   END=$(date +%s)
   if echo "$RESP" | grep -q '"response"'; then
     TEXT=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("response","").strip())' 2>/dev/null)
     [ -z "$TEXT" ] && TEXT="(empty)"
-    ok "Model generated a response in $((END-START))s"
+    ok "$GEN_MODEL generated a response in $((END-START))s"
     echo "      model said: ${TEXT}"
     if [ "$((END-START))" -gt 20 ]; then
       warn "that was slow — check 'ollama ps' shows 100% GPU (not a CPU split / cold load)"
     fi
   else
-    bad "Generation call failed (model loaded but no response)"
+    bad "$GEN_MODEL failed to generate — it may not load on this build (check: journalctl -u ollama)"
   fi
 else
-  warn "Model '$TEST_MODEL' not installed — skipping generation test"
-  warn "install with:  ollama pull $TEST_MODEL   (or edit TEST_MODEL in this script)"
+  warn "no chat model installed to test — pull one (e.g. ollama pull gemma4:26b)"
 fi
 
 # -----------------------------------------------------------------
@@ -181,8 +196,9 @@ for c in "$TIKA_CONTAINER" "$VISION_CONTAINER"; do
   fi
 done
 # a vision model (for --describe-figures) present on the host Ollama?
-if echo "$MODELS" | grep -qiE '"(llava|moondream|bakllava)'; then
-  ok "a vision model is available (for --describe-figures)"
+if echo "$MODEL_NAMES" | grep -qiE "$VISION_PAT"; then
+  VMOD=$(echo "$MODEL_NAMES" | grep -iE "$VISION_PAT" | head -1)
+  ok "a vision model is available ($VMOD) — for --describe-figures"
   found_addon=1
 fi
 [ "$found_addon" -eq 0 ] && warn "no optional add-ons detected (Tika / vision) — fine if unused"
