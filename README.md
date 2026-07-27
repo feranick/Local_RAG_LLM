@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.11.3**
+**Version 2026.07.11.4**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -24,6 +24,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), interactively selects + pulls the chat/embedding/vision models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `sync_folder.py` | Syncs a local folder into an AnythingLLM workspace or Open WebUI collection: adds new/changed files, mirrors deletions (`--prune`), re-syncs on demand (`--force`), auto-OCRs text-less PDFs (`--ocr-fallback`), and describes figures in PDFs and standalone images via a vision model (`--describe-figures`). |
+| `update_local_rag.sh` | Updates the stack when newer images exist — refreshes the containers (Open WebUI, AnythingLLM, and Tika/vision if present) while preserving data. `--check` reports without changing. |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 
 ---
@@ -217,7 +218,16 @@ rm ~/.rag_sync_state.json
 python3 sync_folder.py
 ```
 
-But note: deleting the state file forgets the remote ids, so the old copies are **not** removed and you'll get duplicates in the collection. For a clean slate this way, first empty (or delete and recreate) the Knowledge collection in the UI, then delete the state file and sync. In general, prefer `--force` — it's the tidy option.
+But note: deleting the state file forgets the remote ids, so the old copies are **not** removed and you'll get duplicates in the collection. So for a full clean slate, empty the collection *and* delete the state file, then sync.
+
+**Emptying an Open WebUI collection.** There's no "delete all" button in the UI — the `⋯` menu deletes one file at a time. To wipe the whole collection at once, use the reset API endpoint (this keeps the same collection id, so `RAG_TARGET` stays valid):
+
+```bash
+curl -X POST http://localhost:3000/api/v1/knowledge/<COLLECTION_ID>/reset \
+  -H "Authorization: Bearer $(cat ~/.rag_sync_key)"
+```
+
+Then `rm ~/.rag_sync_state.json` and re-sync. (If your build lacks `/reset`, delete the collection from **Workspace → Knowledge** in the UI, create a new one, and put its new id in `TARGET`.) In general, for routine refreshes prefer `--force` — it's the tidy option that avoids all this.
 
 `--ocr-fallback` (or `RAG_OCR_FALLBACK=1`): when the server reports "content empty" for a PDF, the script runs `ocrmypdf --force-ocr` on it locally and retries the upload once — since both the script and OCR run on the Spark, it can self-heal text-less PDFs with no manual step. Flags combine, e.g. `--prune --ocr-fallback`.
 
@@ -293,6 +303,22 @@ sudo docker network connect rag-net open-webui                  # put Open WebUI
 ```
 
 Then in **Admin → Settings → Documents**: Content Extraction Engine → **Tika**, server URL `http://tika:9998`, Save. Re-add any documents that previously failed. If you ever remove Tika, switch the engine back to **Default** first, or ingestion will break.
+
+---
+
+## Updating
+
+When Open WebUI, AnythingLLM, or the add-ons ship new versions, refresh them without losing data:
+
+```bash
+./update_local_rag.sh --check   # report which containers have newer images (no changes)
+./update_local_rag.sh           # pull newer images and recreate those containers
+./update_local_rag.sh --pull-models   # also re-pull installed Ollama models to latest tags
+```
+
+It only recreates a container when its image actually changed, preserves the data volumes / AnythingLLM storage, and reattaches containers to the `rag-net` network (Tika) if they were on it. Verify afterward with `./llm_stack_healthcheck.sh`.
+
+**Ollama is left alone by default.** On the DGX Spark it's a custom Blackwell-optimized build; the generic `ollama.com` installer would replace it with the stock ARM build and lose the GB10/FP4 optimizations — so update Ollama through DGX OS / NVIDIA channels instead. `--include-ollama` will run the generic installer anyway, but only after a warning and confirmation (not recommended on the Spark).
 
 ---
 
@@ -378,7 +404,7 @@ sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags |
 ```
 
 **Sync reports `400: Duplicate content detected` for files I'm sure are unique.**
-It's usually not a real duplicate — Open WebUI dedupes by document *content* within the collection, and this means the file is **already in the collection**. It happens when the sync state file and the collection drift apart (e.g. you deleted `~/.rag_sync_state.json`, or changed `RAG_TARGET`, so the script re-tries files that are already there). The script now treats this as "already present," records the file so it won't retry, and reports a count at the end rather than failing. For a clean, consistent rebuild: empty the collection in the UI (or delete & recreate it), then `rm ~/.rag_sync_state.json` and re-sync once. After that, state matches the collection and `--force` / `--prune` behave correctly.
+It's usually not a real duplicate — Open WebUI dedupes by document *content* within the collection, and this means the file is **already in the collection**. It happens when the sync state file and the collection drift apart (e.g. you deleted `~/.rag_sync_state.json`, or changed `RAG_TARGET`, so the script re-tries files that are already there). The script now treats this as "already present," records the file so it won't retry, and reports a count at the end rather than failing. For a clean, consistent rebuild: empty the collection (reset API — see "Emptying an Open WebUI collection" under Re-syncing), then `rm ~/.rag_sync_state.json` and re-sync once. After that, state matches the collection and `--force` / `--prune` behave correctly.
 
 **The chat echoes my prompt back verbatim instead of answering.**
 The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting Gemma as the default model and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).
