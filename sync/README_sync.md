@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.11.6**
+**Version 2026.07.27.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -78,6 +78,7 @@ python3 sync_folder.py --prune             # full mirror (also removes deleted f
 python3 sync_folder.py --force             # re-sync everything even if unchanged
 python3 sync_folder.py --ocr-fallback      # auto-OCR PDFs that extract to empty, then retry
 python3 sync_folder.py --describe-figures  # also index vision descriptions of plots/figures/images
+python3 sync_folder.py --no-preflight      # skip the pre-upload low-text warning
 ```
 
 Flags combine, e.g. `--prune --ocr-fallback --describe-figures`.
@@ -87,6 +88,10 @@ Environment variables override the in-file defaults for one-off runs:
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 ```
+
+### Pre-flight low-text warning
+
+Before each upload the script does a quick local check and prints a `!` warning if a file looks like it has little extractable text — a JavaScript-shell HTML (a saved journal page that's just the loader, not the article), a scanned/no-text-layer PDF, or a near-empty file. It **only warns; it never blocks the upload.** This helps you spot papers that will index poorly (and often show up later as phantom "duplicates" because many shell pages extract to the same boilerplate). Turn it off with `--no-preflight`, or tune the HTML threshold with `RAG_MIN_TEXT_CHARS` (default 400). The PDF part of the check needs PyMuPDF; it's skipped silently if not installed.
 
 ### On a schedule (cron)
 
@@ -189,6 +194,8 @@ RAG_FIGURE_MODEL=llava:13b python3 sync_folder.py --describe-figures   # larger 
 
 It also indexes **standalone image files** — `.png`, `.jpg/.jpeg`, `.tif/.tiff`, `.webp`, `.bmp`, `.gif`. Each is described by the vision model and its description uploaded as a text document, so loose figures/screenshots/plots become retrievable too (skipped without `--describe-figures`, since a raw image has no extractable text). Because a standalone image usually has no caption, the script also **passes the file name to the vision model as context** — so a descriptive name like `voltivity_resistivity_vs_temp.png` genuinely improves the description. If a **sidecar text file** with the same basename sits next to the image (`figure1.png` + `figure1.txt`, or `figure1.png.txt`; also `.md`/`.caption`/`.json`), its contents are fed in as extra context too. Tracking, `--force`, and `--prune` apply to images the same as documents.
 
+Each figure/image description doc is stamped with a **source-unique content id** (the md5 of the source file), so two different figures — even from the same paper (e.g. a `.html` plus a `.gif` and a `.jpg`) — can never collide on Open WebUI's content-hash dedup and be wrongly rejected as "duplicate."
+
 > **Vision model note (DGX Spark).** The default is **`llava`**, not Llama 3.2 Vision. The Spark's custom Blackwell-optimized Ollama build does **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
 
 > **Important — numbers are approximate.** Vision models reliably capture *what* a figure shows and its trends, but they **hallucinate exact chart values**. Treat extracted numbers as approximate and verify against the source figure. For precise datapoints use a plot-digitizer tool. This is a retrieval/understanding aid, not a data-extraction guarantee, and it's slower than a text-only sync (one model call per page), so it's opt-in.
@@ -205,6 +212,8 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | `--force` | `RAG_FORCE=1` | re-sync every file even if unchanged (removes old copy first) |
 | `--ocr-fallback` | `RAG_OCR_FALLBACK=1` | OCR a PDF locally and retry when the server extracts no text |
 | `--describe-figures` | `RAG_DESCRIBE_FIGURES=1` | describe PDF figures + standalone images with a vision model |
+| `--no-preflight` | `RAG_NO_PREFLIGHT=1` | disable the pre-upload low-text warning |
+| — | `RAG_MIN_TEXT_CHARS` | HTML low-text threshold in chars (default 400) |
 | — | `RAG_BACKEND` | `openwebui` / `anythingllm` |
 | — | `RAG_TARGET` | collection id / workspace slug |
 | — | `RAG_API_KEY` / `RAG_KEY_FILE` | key value / path to key file (default `~/.rag_sync_key`) |

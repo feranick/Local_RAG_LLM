@@ -28,6 +28,9 @@ works), or via environment variables which override those defaults:
                   old copy first, then re-uploads). Same as passing --force.
   RAG_OCR_FALLBACK "1"/"true" to auto-OCR a PDF (ocrmypdf) and retry when the
                   server extracts no text. Same as passing --ocr-fallback.
+  RAG_NO_PREFLIGHT "1"/"true" to disable the pre-upload low-text warning
+                  (JS-shell HTML / scanned PDF heads-up). Same as --no-preflight.
+  RAG_MIN_TEXT_CHARS  min extractable chars before an HTML is flagged (default 400)
   RAG_DESCRIBE_FIGURES "1"/"true" to render each PDF, have a local vision model
                   describe its figures/plots, and upload those descriptions as a
                   companion doc (so plots become retrievable). Also indexes any
@@ -60,6 +63,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -119,6 +123,12 @@ DESCRIBE_FIGURES = ("--describe-figures" in sys.argv) or (os.environ.get("RAG_DE
 FIGURE_MODEL = os.environ.get("RAG_FIGURE_MODEL", "llava")   # vision model (Western; loads on the Spark's Ollama build)
 OLLAMA_URL   = os.environ.get("RAG_OLLAMA_URL", "http://localhost:11434")
 FIGURE_DPI   = int(os.environ.get("RAG_FIGURE_DPI", "150"))
+
+# preflight = before uploading, warn if a file has little extractable text (a
+# JavaScript-shell HTML, a scanned/no-text-layer PDF, or a near-empty doc). It
+# only warns — it never blocks the upload. Disable with --no-preflight.
+PREFLIGHT = ("--no-preflight" not in sys.argv) and (os.environ.get("RAG_NO_PREFLIGHT", "").lower() not in ("1", "true", "yes"))
+MIN_TEXT_CHARS = int(os.environ.get("RAG_MIN_TEXT_CHARS", "400"))
 
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
@@ -316,6 +326,45 @@ def find_sidecar_text(img_path):
     return "", ""
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def preflight_text_warning(path):
+    """Heuristic heads-up (never blocks): return a warning string if the file
+    looks like it has little extractable text — a JavaScript-shell HTML, a
+    scanned/no-text-layer PDF, or a near-empty doc. Else ''."""
+    if not PREFLIGHT:
+        return ""
+    ext = path.suffix.lower()
+    try:
+        if ext in (".html", ".htm"):
+            raw = path.read_text(errors="ignore")
+            text = _WS_RE.sub(" ", _TAG_RE.sub(" ", raw)).strip()
+            shell = ("enable javascript" in raw.lower() or "please enable" in raw.lower())
+            if len(text) < MIN_TEXT_CHARS or (shell and len(text) < 3000):
+                extra = " + JavaScript-shell markers" if shell else ""
+                return (f"low extractable text (~{len(text)} chars{extra}) — may be a "
+                        "saved shell page, not the article; prefer the PDF or enable Tika")
+        elif ext == ".pdf":
+            try:
+                import fitz
+            except ImportError:
+                return ""
+            d = fitz.open(str(path))
+            chars = sum(len(d[i].get_text("text").strip()) for i in range(min(3, d.page_count)))
+            d.close()
+            if chars < 100:
+                return (f"almost no text in the first pages (~{chars} chars) — likely "
+                        "scanned / no text layer; try --ocr-fallback")
+        elif ext in (".txt", ".md", ".csv", ".rtf"):
+            if path.stat().st_size < 40:
+                return "file is nearly empty"
+    except Exception:
+        return ""
+    return ""
+
+
 def build_figures_doc(session, pdf_path):
     """Render each page of a PDF and have the vision model describe any figures.
     Writes the descriptions to a temp .md file. Returns (md_path, n_pages_with_figures)
@@ -355,7 +404,10 @@ def build_figures_doc(session, pdf_path):
         return None, 0
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="rag_fig_"))
     out = tmpdir / f"{pdf_path.stem}_figures.md"
+    # include a source-unique id so two companion docs can never collide on
+    # Open WebUI's content-hash dedup (which would flag a real figure as duplicate)
     header = (f"# Figure descriptions for {pdf_path.name}\n\n"
+              f"Source file: `{pdf_path.name}` (content-id `{file_hash(pdf_path)}`)\n\n"
               "Auto-generated visual descriptions of figures/plots (via a vision "
               "model). Numeric values are approximate — verify against the source "
               "figure before relying on them.\n\n")
@@ -419,7 +471,10 @@ def build_image_doc(session, img_path):
         return None
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="rag_img_"))
     out = tmpdir / f"{img_path.stem}_image.md"
+    # include a source-unique id so two image-description docs can never collide
+    # on Open WebUI's content-hash dedup (which would flag a real figure as duplicate)
     header = (f"# Description of image {img_path.name}\n\n"
+              f"Source file: `{img_path.name}` (content-id `{file_hash(img_path)}`)\n\n"
               "Auto-generated description of a standalone image (via a vision "
               "model). Numeric values are approximate — verify against the source "
               "image before relying on them.\n\n")
@@ -510,6 +565,9 @@ def main():
 
         # --- document files (pdf / text) ---
         print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
+        pf = preflight_text_warning(p)
+        if pf:
+            print(f"[sync]   ! {pf}")
         try:
             if is_update:
                 # changed file: remove the old copy (and its figure doc) first
