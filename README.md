@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.11.2**
+**Version 2026.07.11.3**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -376,6 +376,9 @@ It isn't a dropdown — it's a free-text input. Type the model name in by hand (
 ```bash
 sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags | grep -o '"name":"[^"]*"'
 ```
+
+**Sync reports `400: Duplicate content detected` for files I'm sure are unique.**
+It's usually not a real duplicate — Open WebUI dedupes by document *content* within the collection, and this means the file is **already in the collection**. It happens when the sync state file and the collection drift apart (e.g. you deleted `~/.rag_sync_state.json`, or changed `RAG_TARGET`, so the script re-tries files that are already there). The script now treats this as "already present," records the file so it won't retry, and reports a count at the end rather than failing. For a clean, consistent rebuild: empty the collection in the UI (or delete & recreate it), then `rm ~/.rag_sync_state.json` and re-sync once. After that, state matches the collection and `--force` / `--prune` behave correctly.
 
 **The chat echoes my prompt back verbatim instead of answering.**
 The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting Gemma as the default model and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).

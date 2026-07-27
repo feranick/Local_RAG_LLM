@@ -451,8 +451,8 @@ def main():
     state["backend"], state["target"] = BACKEND, TARGET
     files = state.setdefault("files", {})
 
-    added = updated = removed = 0
-    failed = []   # (name, reason) for files that couldn't be added
+    added = updated = removed = dup = 0
+    failed = []   # names of files that couldn't be added
 
     # --- add / update files currently on disk ---
     on_disk = set()
@@ -496,6 +496,12 @@ def main():
                     detail = (e.response.text or "")[:400]
                 except Exception:
                     pass
+                if "duplicate" in detail.lower():
+                    files[key] = {"hash": digest,
+                                  "remote_id": (entry.get("remote_id") if entry else None)}
+                    print("[sync]   image description already in collection — recorded, will skip next run")
+                    dup += 1
+                    continue
                 print(f"[sync]   FAILED: {p.name}")
                 if detail:
                     print(f"[sync]     server said: {detail}")
@@ -523,6 +529,16 @@ def main():
                 pass
             low = detail.lower()
             empty_content = ("empty" in low and "content" in low)
+
+            # Already in the collection: Open WebUI dedupes by content. Not an
+            # error — record it so we stop retrying. (No in-KB id is returned, so
+            # prune/force can't manage it until a clean re-sync of the collection.)
+            if "duplicate" in low:
+                files[key] = {"hash": digest,
+                              "remote_id": (entry.get("remote_id") if entry else None)}
+                print(f"[sync]   already in collection (duplicate content) — recorded, will skip next run")
+                dup += 1
+                continue
 
             # Auto-recovery: OCR the PDF locally and retry once (opt-in).
             if empty_content and OCR_FALLBACK and p.suffix.lower() == ".pdf":
@@ -583,8 +599,12 @@ def main():
 
     save_state(state)
     print(f"[sync] done — {added} added, {updated} updated, {removed} removed, "
-          f"{len(files)} tracked total"
+          f"{dup} already-present, {len(files)} tracked total"
           f"{' (prune ON)' if PRUNE else ''}.")
+    if dup:
+        print(f"[sync] {dup} file(s) were already in the collection (recorded, won't retry). "
+              f"If that's unexpected, the collection and state drifted — empty the collection "
+              f"and re-sync for a clean rebuild.")
 
     if failed:
         print(f"[sync] {len(failed)} file(s) FAILED and were not added:")
