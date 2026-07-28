@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.2**
+**Version 2026.07.28.3**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -342,6 +342,17 @@ Open WebUI's upload endpoint returns `200` **before** it has extracted the docum
 
 **`400: Duplicate content detected` — other causes.**
 Usually not a real duplicate — Open WebUI dedupes by document *content*, so the file is already stored. It happens when the state file and the collection drift apart (you deleted `~/.rag_sync_state.json`, or changed `TARGET`). The script treats this as "already present," records the file so it won't retry, and reports a count at the end. If a file is flagged duplicate even though it's **not** in the collection, the cause is orphan stored file objects from earlier syncs — resetting the collection alone won't clear them; you must also `DELETE /api/v1/files/all` (see "Fully wiping an Open WebUI collection"), then `rm ~/.rag_sync_state.json` and re-sync.
+
+**A few very large PDFs fail (books, theses — hundreds of pages).**
+Not a language or content problem: extracting and embedding a 150–250 page,
+300k–550k-character document takes Open WebUI minutes, and an early attach lands
+back in the empty-content race. Since 2026.07.28.3 the script scales its wait with
+file size (180 s up to 30 min for a 70 MB file) instead of using one short timeout,
+samples pages *evenly across* a PDF when judging whether it has text (so a scanned
+cover page no longer makes a text-rich thesis look scanned), and skips the OCR
+fallback for PDFs that already contain text — force-OCRing a 200-page file wastes
+a great deal of time and cannot help. If one still fails, sync it on its own
+(`--force` with only that file present) so it isn't competing for the server.
 
 **`400: The content provided is empty` (or a chat says "No sources found").**
 Open WebUI extracted no text from that file. Likely causes: (1) the extraction engine is set to Tika/Docling but that service isn't running — set it back to **Default** or start the service (see the main README's Tika section); (2) the PDF has no text layer — test with `pdftotext file.pdf - | head`, and use `--ocr-fallback` (or OCR manually) if empty; (3) the Default parser choked on a specific PDF — OCR it or use Tika. Filenames with spaces/quotes can also break the upload — prefer `Underscore_Names.pdf`.

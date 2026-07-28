@@ -15,7 +15,7 @@ Optional: `pip install pymupdf` lets it also flag PDFs with no extractable text
 (scanned / image-only), which are the ones that need OCR.
 """
 
-__version__ = "2026.07.27.4"
+__version__ = "2026.07.28.1"
 
 import csv
 import sys
@@ -37,17 +37,31 @@ def human(n):
         n /= 1024
 
 
-def pdf_has_text(p, min_chars=100):
-    """True/False if PyMuPDF is available, else None (unknown)."""
+def pdf_has_text(p, min_chars=100, max_pages=12):
+    """True/False if PyMuPDF is available, else None (unknown).
+
+    Samples pages EVENLY across the file rather than just the first few: long
+    documents (theses, edited volumes) often open with scanned covers or title
+    art while the body is perfectly extractable text, and first-pages-only
+    sampling would wrongly report them as scanned.
+    """
     try:
         import fitz
     except ImportError:
         return None
     try:
         d = fitz.open(str(p))
-        n = sum(len(d[i].get_text("text").strip()) for i in range(min(3, d.page_count)))
+        n = d.page_count
+        idxs = range(n) if n <= max_pages else [
+            int(i * (n - 1) / (max_pages - 1)) for i in range(max_pages)]
+        total = 0
+        for i in idxs:
+            try:
+                total += len(d[i].get_text("text").strip())
+            except Exception:
+                pass
         d.close()
-        return n >= min_chars
+        return total >= min_chars
     except Exception:
         return False
 

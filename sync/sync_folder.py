@@ -247,8 +247,15 @@ def add_openwebui(session, path):
     r.raise_for_status()
     file_id = r.json().get("id")
     if TARGET and file_id:
-        # Don't attach until the server has actually extracted the text.
-        n_chars, waited = _wait_for_extraction(session, file_id)
+        # Don't attach until the server has actually extracted the text. Large
+        # documents (hundreds of pages) take minutes, so scale the patience with
+        # the file size instead of using one short fixed timeout.
+        try:
+            mb = path.stat().st_size / 1e6
+        except OSError:
+            mb = 1.0
+        wait_s = int(min(1800, max(180, mb * 30)))
+        n_chars, waited = _wait_for_extraction(session, file_id, wait_s)
         if waited:
             if n_chars > 0:
                 print(f"      (waited for text extraction: {n_chars} chars)")
@@ -380,6 +387,34 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
+def pdf_text_chars(path, max_pages=12):
+    """Extractable characters in a PDF, sampled EVENLY across the whole file.
+
+    Sampling only the first pages misreads long documents whose opening pages are
+    scanned covers/title art but whose body is real text — they'd be flagged as
+    'scanned' and pointlessly sent to OCR. Returns -1 if PyMuPDF isn't available.
+    """
+    try:
+        import fitz
+    except ImportError:
+        return -1
+    try:
+        d = fitz.open(str(path))
+        n = d.page_count
+        idxs = range(n) if n <= max_pages else [
+            int(i * (n - 1) / (max_pages - 1)) for i in range(max_pages)]
+        total = 0
+        for i in idxs:
+            try:
+                total += len(d[i].get_text("text").strip())
+            except Exception:
+                pass
+        d.close()
+        return total
+    except Exception:
+        return -1
+
+
 def preflight_text_warning(path):
     """Heuristic heads-up (never blocks): return a warning string if the file
     looks like it has little extractable text — a JavaScript-shell HTML, a
@@ -397,16 +432,12 @@ def preflight_text_warning(path):
                 return (f"low extractable text (~{len(text)} chars{extra}) — may be a "
                         "saved shell page, not the article; prefer the PDF or enable Tika")
         elif ext == ".pdf":
-            try:
-                import fitz
-            except ImportError:
-                return ""
-            d = fitz.open(str(path))
-            chars = sum(len(d[i].get_text("text").strip()) for i in range(min(3, d.page_count)))
-            d.close()
+            chars = pdf_text_chars(path)
+            if chars < 0:
+                return ""                      # PyMuPDF missing — can't tell
             if chars < 100:
-                return (f"almost no text in the first pages (~{chars} chars) — likely "
-                        "scanned / no text layer; try --ocr-fallback")
+                return (f"almost no extractable text (~{chars} chars sampled across "
+                        "the file) — likely scanned / no text layer; try --ocr-fallback")
         elif ext in (".txt", ".md", ".csv", ".rtf"):
             if path.stat().st_size < 40:
                 return "file is nearly empty"
@@ -655,7 +686,10 @@ def main():
                 continue
 
             # Auto-recovery: OCR the PDF locally and retry once (opt-in).
-            if empty_content and OCR_FALLBACK and p.suffix.lower() == ".pdf":
+            # Skip it when the PDF demonstrably already HAS text — OCR can't help,
+            # and force-OCRing a 200-page file wastes a lot of time.
+            if (empty_content and OCR_FALLBACK and p.suffix.lower() == ".pdf"
+                    and pdf_text_chars(p) < 500):
                 ocr_path = make_ocr_copy(p)
                 if ocr_path:
                     try:
@@ -677,7 +711,11 @@ def main():
             print(f"[sync]   FAILED: {p.name}")
             if detail:
                 print(f"[sync]     server said: {detail}")
-            if empty_content:
+            if empty_content and pdf_text_chars(p) >= 500:
+                print("[sync]     hint: this file DOES contain extractable text, so the "
+                      "server-side extraction is at fault — usually a large document "
+                      "timing out. Retry it alone, or check the extraction engine.")
+            elif empty_content:
                 print("[sync]     hint: the server extracted no text. Common causes:")
                 print("[sync]       - extraction engine set to Tika/Docling but that service")
                 print("[sync]         isn't running -> revert to Default (or start Tika), in")
