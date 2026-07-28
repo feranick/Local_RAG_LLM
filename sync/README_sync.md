@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.27.3**
+**Version 2026.07.27.4**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -103,6 +103,45 @@ Every 15 minutes (add `--prune` to keep the collection mirrored). With defaults 
 ```
 
 For near-instant updates instead of polling, swap the loop for Python `watchdog` as a systemd service. AnythingLLM also has built-in **Scheduled Jobs** and a beta **Live Document Sync**.
+
+---
+
+## Rebuilding the whole library from scratch
+
+Steps 1–5 (fetch the papers, recover what curl couldn't, consolidate, and check
+coverage) live in the **proxify toolkit README** under *Complete workflow*. Do
+those first — in particular the browser pass and the `library_stats.py` coverage
+check, since a library that's mostly metadata-only stubs caps what the RAG can
+ever answer. Then:
+
+### 6. Wipe the collection and sync
+
+```bash
+KEY=$(cat ~/.rag_sync_key)
+curl -sS -X POST "http://localhost:3000/api/v1/knowledge/<COLLECTION_ID>/reset" \
+  -H "Authorization: Bearer $KEY"; echo
+curl -sS -X DELETE "http://localhost:3000/api/v1/files/all" \
+  -H "Authorization: Bearer $KEY"; echo
+rm -f ~/.rag_sync_state.json
+
+python3 sync_folder.py --describe-figures --ocr-fallback
+```
+
+Both API calls matter — see
+[Fully wiping an Open WebUI collection](#fully-wiping-an-open-webui-collection-true-clean-slate)
+for why resetting the collection alone isn't enough. With `--describe-figures`
+this takes hours for a large library (one vision-model call per page), so run it
+under `tmux`/`screen`.
+
+### 7. Verify
+
+- The final `[sync] done —` line should show nearly everything **added**, with
+  `already-present` down to just genuinely identical files (e.g. the same paper
+  saved twice under different years).
+- **Workspace → Knowledge → Papers** should show a file count in the right
+  ballpark (documents + figure-description companions).
+- Ask a real question in a new chat: select your chat model, type `#` and click
+  the collection, and confirm the answer cites actual papers.
 
 ---
 
