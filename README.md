@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.27.1**
+**Version 2026.07.28.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -184,6 +184,8 @@ When Open WebUI, AnythingLLM, or the add-ons ship new versions, refresh them wit
 ```
 
 It only recreates a container when its image actually changed, preserves the data volumes / AnythingLLM storage, and reattaches containers to the `rag-net` network (Tika) if they were on it. Verify afterward with `./llm_stack_healthcheck.sh`.
+
+> **After an Open WebUI image update, clear the browser cache once.** The updated container serves new JS chunk names, so a cached app shell from the old version 404s and the UI gets stuck on the "OI" splash in a reload loop. Fix: DevTools → Application → Storage → **Clear site data** (a plain hard-refresh often won't clear the service worker), then reload. Nothing is wrong server-side — see the sync README's troubleshooting for how to tell this apart from Ollama being busy.
 
 **Ollama is left alone by default.** On the DGX Spark it's a custom Blackwell-optimized build; the generic `ollama.com` installer would replace it with the stock ARM build and lose the GB10/FP4 optimizations — so update Ollama through DGX OS / NVIDIA channels instead. `--include-ollama` will run the generic installer anyway, but only after a warning and confirmation (not recommended on the Spark).
 

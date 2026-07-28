@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.27.4**
+**Version 2026.07.28.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -265,6 +265,59 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 ---
 
 ## Sync troubleshooting
+
+**Open WebUI is stuck on the "OI" splash screen / reload loop.**
+First diagnose — the two causes have completely different fixes:
+
+```bash
+sudo docker ps                                   # healthy or unhealthy?
+sudo docker logs --tail 30 open-webui            # look for repeated 404s
+ollama ps                                        # what's loaded / busy
+curl -m 5 http://localhost:11434/api/tags >/dev/null && echo "ollama OK" || echo "ollama busy"
+curl -m 5 http://localhost:3000/health && echo " backend OK"
+```
+
+*Cause 1 — stale cached frontend (most common; nothing to do with the sync).*
+The logs show a fast-repeating 404 for an immutable JS chunk, e.g.:
+
+```
+"GET /_app/immutable/chunks/DI6U-d8h.js HTTP/1.1" 404
+"GET /_app/version.json HTTP/1.1" 200
+```
+
+Your browser is serving a cached app shell from the **previous** Open WebUI image
+that references chunks the updated container no longer has; the app can't boot and
+SvelteKit's version polling reloads it in a loop. Ollama and the backend are both
+healthy in this case. Fix it in the **browser**, not on the server:
+
+1. Open the site in an incognito window — if it works there, it's confirmed cache.
+2. **DevTools (F12) → Application → Storage → Clear site data** (clears the
+   service worker too; a plain Ctrl+Shift+R often isn't enough), or delete the
+   site's data via Chrome → Settings → Privacy → Site settings.
+3. Reload.
+
+Do one hard refresh / clear-site-data after any update that bumps the Open WebUI
+image — that's the whole prevention.
+
+*Cause 2 — Ollama saturated by a long `--describe-figures` sync.* Here `ollama
+busy` fails while the backend is OK, because the UI's model-list call is queued
+behind thousands of vision-model requests. `sudo docker restart open-webui` clears
+the symptom; to prevent it, let Ollama serve concurrently (both models fit in the
+Spark's 128 GB):
+
+```bash
+sudo systemctl edit ollama
+# add under [Service]:
+#   Environment="OLLAMA_MAX_LOADED_MODELS=2"
+#   Environment="OLLAMA_NUM_PARALLEL=2"
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+```
+
+Also useful: enable **Cache Base Model List** (Admin Settings → Connections) so
+the model list is fetched once at startup instead of on every page load; or run
+the vision work against a separate containerized Ollama
+(`RAG_OLLAMA_URL=http://localhost:11435`); or just run long figure syncs overnight.
+
 
 **`400: Duplicate content detected` for files I'm sure are unique — the common cause.**
 Open WebUI's upload endpoint returns `200` **before** it has extracted the document's text, so for a moment the file's stored content is empty. If the script attaches it in that window, the server hashes *empty* content, matches it against any other still-unprocessed file, and reports "Duplicate content detected" — even though the two documents are completely different. This affects PDFs and markdown alike, recurs on every run, and is unaffected by wiping the collection. **Fixed in 2026.07.27.3**: the script now polls the uploaded file until the server reports extracted text (or a terminal status) before attaching, and never deletes a file on a duplicate response. If you see this on an older version, upgrade the script.
