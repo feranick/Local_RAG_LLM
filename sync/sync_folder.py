@@ -206,6 +206,36 @@ def remove_anythingllm(session, remote_id):
                  json={"names": [remote_id]}, timeout=300)
 
 
+def _wait_for_extraction(session, file_id, timeout_s=180):
+    """Block until Open WebUI has finished extracting text from an uploaded file.
+
+    The upload endpoint returns 200 *before* extraction completes, so the file's
+    content is briefly empty. Attaching it in that window makes the server hash
+    EMPTY content — which then collides with any other still-empty file and is
+    reported as "Duplicate content detected" even though the documents differ.
+    Waiting for the content (or a terminal status) removes that race.
+    Returns (chars_extracted, did_wait); chars is -1 on timeout.
+    """
+    waited = False
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            r = session.get(f"{BASE_URL}/api/v1/files/{file_id}", timeout=60)
+            if r.status_code == 200:
+                d = (r.json().get("data") or {})
+                content = d.get("content") or ""
+                status = str(d.get("status") or "").lower()
+                if content.strip():
+                    return len(content), waited
+                if status in ("completed", "failed", "error"):
+                    return len(content), waited
+        except Exception:
+            pass
+        waited = True
+        time.sleep(2)
+    return -1, waited
+
+
 def add_openwebui(session, path):
     with open(path, "rb") as f:
         r = session.post(f"{BASE_URL}/api/v1/files/",
@@ -213,6 +243,15 @@ def add_openwebui(session, path):
     r.raise_for_status()
     file_id = r.json().get("id")
     if TARGET and file_id:
+        # Don't attach until the server has actually extracted the text.
+        n_chars, waited = _wait_for_extraction(session, file_id)
+        if waited:
+            if n_chars > 0:
+                print(f"      (waited for text extraction: {n_chars} chars)")
+            elif n_chars == 0:
+                print("      (server extracted no text from this file)")
+            else:
+                print("      (timed out waiting for text extraction — attaching anyway)")
         # Text extraction can lag behind the upload for large files, so a
         # "content is empty" 400 may just mean processing isn't finished.
         # Retry the attach for a while before giving up.
@@ -222,17 +261,24 @@ def add_openwebui(session, path):
                                 json={"file_id": file_id}, timeout=300)
             if resp.status_code == 200:
                 return file_id
-            if resp.status_code == 400 and "empty" in resp.text.lower() and i < attempts - 1:
+            low = resp.text.lower()
+            if resp.status_code == 400 and "empty" in low and i < attempts - 1:
                 if i == 0:
                     print("      (waiting for the server to finish extracting text…)")
                 time.sleep(3)
                 continue
+            # A "duplicate" seen on a RETRY means our own earlier attempt already
+            # attached the file — treat it as success, and never delete it.
+            if resp.status_code == 400 and "duplicate" in low and i > 0:
+                return file_id
             # Permanent failure: delete the just-uploaded file so it doesn't
             # linger on the server as an orphan, then surface the error.
-            try:
-                session.delete(f"{BASE_URL}/api/v1/files/{file_id}", timeout=60)
-            except Exception:
-                pass
+            # (Not for duplicates: the twin may be a file we legitimately added.)
+            if "duplicate" not in low:
+                try:
+                    session.delete(f"{BASE_URL}/api/v1/files/{file_id}", timeout=60)
+                except Exception:
+                    pass
             resp.raise_for_status()   # a different error, or retries exhausted
     return file_id
 

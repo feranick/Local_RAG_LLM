@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.27.1**
+**Version 2026.07.27.3**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -227,7 +227,10 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 
 ## Sync troubleshooting
 
-**`400: Duplicate content detected` for files I'm sure are unique.**
+**`400: Duplicate content detected` for files I'm sure are unique — the common cause.**
+Open WebUI's upload endpoint returns `200` **before** it has extracted the document's text, so for a moment the file's stored content is empty. If the script attaches it in that window, the server hashes *empty* content, matches it against any other still-unprocessed file, and reports "Duplicate content detected" — even though the two documents are completely different. This affects PDFs and markdown alike, recurs on every run, and is unaffected by wiping the collection. **Fixed in 2026.07.27.3**: the script now polls the uploaded file until the server reports extracted text (or a terminal status) before attaching, and never deletes a file on a duplicate response. If you see this on an older version, upgrade the script.
+
+**`400: Duplicate content detected` — other causes.**
 Usually not a real duplicate — Open WebUI dedupes by document *content*, so the file is already stored. It happens when the state file and the collection drift apart (you deleted `~/.rag_sync_state.json`, or changed `TARGET`). The script treats this as "already present," records the file so it won't retry, and reports a count at the end. If a file is flagged duplicate even though it's **not** in the collection, the cause is orphan stored file objects from earlier syncs — resetting the collection alone won't clear them; you must also `DELETE /api/v1/files/all` (see "Fully wiping an Open WebUI collection"), then `rm ~/.rag_sync_state.json` and re-sync.
 
 **`400: The content provided is empty` (or a chat says "No sources found").**
