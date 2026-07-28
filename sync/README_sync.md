@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.1**
+**Version 2026.07.28.2**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -88,6 +88,24 @@ Environment variables override the in-file defaults for one-off runs:
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 ```
+
+### End-of-run summary
+
+Each run finishes with the totals plus a breakdown of what actually made it in,
+so you can see at a glance whether the library is mostly full text or mostly
+abstract stubs:
+
+```
+[sync] done — 1009 added, 0 updated, 0 removed, 2 already-present, 1009 tracked total.
+[sync] processed this run:
+         full PDFs                 : 215  (1 recovered via OCR)
+         abstract/metadata .md     : 794
+         standalone images         : 12
+         figure-description docs   : 180  (from 940 page(s) containing figures)
+```
+
+For a view of the whole library (not just this run), including which papers are
+metadata-only and which PDFs have no extractable text, use `library_stats.py`.
 
 ### Pre-flight low-text warning
 

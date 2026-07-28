@@ -72,6 +72,7 @@ import shutil
 import hashlib
 import pathlib
 import tempfile
+import collections
 import subprocess
 
 try:
@@ -144,6 +145,9 @@ EXTS = {".pdf", ".txt", ".md", ".docx", ".doc", ".epub", ".csv", ".html", ".rtf"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
 
 STATE_FILE = pathlib.Path.home() / ".rag_sync_state.json"
+
+# per-type tallies for the end-of-run summary (what actually made it in)
+STATS = collections.Counter()
 # -------------------------------------------------------------------------
 
 
@@ -472,6 +476,8 @@ def attach_figures(session, src_pdf, key, files, add_fn):
     try:
         fig_id = add_fn(session, md_path)
         files[key]["figures_id"] = fig_id
+        STATS["figure_docs"] += 1
+        STATS["figure_pages"] += n
         print(f"[sync]   + figure descriptions added ({n} page(s) with figures)")
     except requests.HTTPError as e:
         print(f"[sync]   figure-description upload failed ({e})")
@@ -590,6 +596,7 @@ def main():
                     shutil.rmtree(md.parent, ignore_errors=True)
                 updated += is_update
                 added += not is_update
+                STATS["images"] += 1
                 print("[sync]   + image description added")
             except requests.HTTPError as e:
                 detail = ""
@@ -624,6 +631,9 @@ def main():
             files[key] = {"hash": digest, "remote_id": remote_id}
             updated += is_update
             added += not is_update
+            STATS["pdfs" if ext == ".pdf" else "text_records"] += 1
+            if ext == ".md":
+                STATS["md_records"] += 1
             attach_figures(session, p, key, files, add_fn)
         except requests.HTTPError as e:
             detail = ""
@@ -653,6 +663,8 @@ def main():
                         files[key] = {"hash": digest, "remote_id": remote_id}
                         added += not is_update
                         updated += is_update
+                        STATS["pdfs"] += 1
+                        STATS["ocr_recovered"] += 1
                         print(f"[sync]   recovered via OCR: {p.name}")
                         shutil.rmtree(ocr_path.parent, ignore_errors=True)
                         attach_figures(session, p, key, files, add_fn)
@@ -705,6 +717,22 @@ def main():
     print(f"[sync] done — {added} added, {updated} updated, {removed} removed, "
           f"{dup} already-present, {len(files)} tracked total"
           f"{' (prune ON)' if PRUNE else ''}.")
+
+    # ---- what actually made it in, by type -----------------------------
+    md = STATS.get("md_records", 0)
+    other_text = STATS.get("text_records", 0) - md
+    print("[sync] processed this run:")
+    print(f"         full PDFs                 : {STATS.get('pdfs', 0)}"
+          + (f"  ({STATS['ocr_recovered']} recovered via OCR)"
+             if STATS.get("ocr_recovered") else ""))
+    print(f"         abstract/metadata .md     : {md}")
+    if other_text:
+        print(f"         other text documents      : {other_text}")
+    print(f"         standalone images         : {STATS.get('images', 0)}"
+          + ("" if DESCRIBE_FIGURES else "   (images need --describe-figures)"))
+    if DESCRIBE_FIGURES:
+        print(f"         figure-description docs   : {STATS.get('figure_docs', 0)}"
+              f"  (from {STATS.get('figure_pages', 0)} page(s) containing figures)")
     if dup:
         print(f"[sync] {dup} file(s) were already in the collection (recorded, won't retry). "
               f"If that's unexpected, the collection and state drifted — empty the collection "
