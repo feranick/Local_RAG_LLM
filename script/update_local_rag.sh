@@ -81,8 +81,11 @@ $DOCKER run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 true >/dev/null 
 # ---- recreate commands (must mirror setup_local_rag.sh) ----
 recreate_open-webui() {
   $DOCKER rm -f open-webui >/dev/null
+  # nofile: embedding a very large document opens thousands of connections to
+  # Ollama; the 1024 default causes "Too many open files"
   $DOCKER run -d --name open-webui --restart always \
     -p "${OPENWEBUI_PORT}:8080" ${GPU_FLAG} \
+    --ulimit nofile=65536:65536 \
     --add-host=host.docker.internal:host-gateway \
     -e OLLAMA_BASE_URL="http://host.docker.internal:${OLLAMA_PORT}" \
     -v open-webui:/app/backend/data \

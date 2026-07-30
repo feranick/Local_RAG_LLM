@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.4**
+**Version 2026.07.28.5**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -362,6 +362,23 @@ request itself outlives its timeout the connection drops. Handling (2026.07.28.4
 
 If one still fails, sync it alone (put just that file in a folder and run against
 it) so it isn't competing with the rest, or split the PDF into parts.
+
+**`400: Cannot connect to host host.docker.internal:11434 [Too many open files]`**
+The document extracted fine, but embedding it exhausted Open WebUI's
+file-descriptor limit: a 500k–900k-character document becomes thousands of chunks,
+and with **Async Embedding Processing** on and **Embedding Concurrent Requests =
+0** (unlimited) it opens a connection to Ollama for each one. Two fixes — do both:
+
+1. **Throttle the embedding** (Admin Settings → **Documents**), no restart needed:
+   - *Embedding Batch Size*: `1` → **`32`** — far fewer requests for the same work
+   - *Embedding Concurrent Requests*: `0` → **`4`**
+2. **Raise the container's FD limit** so it can't recur. `setup_local_rag.sh` and
+   `update_local_rag.sh` now launch Open WebUI with
+   `--ulimit nofile=65536:65536`; to apply it to an existing container, recreate it
+   with `./update_local_rag.sh` (data is preserved).
+
+Only very large documents trigger this, which is why a library of ordinary papers
+syncs cleanly and a few books/proceedings volumes fail.
 
 **`400: The content provided is empty` (or a chat says "No sources found").**
 Open WebUI extracted no text from that file. Likely causes: (1) the extraction engine is set to Tika/Docling but that service isn't running — set it back to **Default** or start the service (see the main README's Tika section); (2) the PDF has no text layer — test with `pdftotext file.pdf - | head`, and use `--ocr-fallback` (or OCR manually) if empty; (3) the Default parser choked on a specific PDF — OCR it or use Tika. Filenames with spaces/quotes can also break the upload — prefer `Underscore_Names.pdf`.

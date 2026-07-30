@@ -261,6 +261,7 @@ if [ "$INSTALL_OPENWEBUI" -eq 1 ]; then
     --restart always \
     -p "${OPENWEBUI_PORT}:8080" \
     ${GPU_FLAG} \
+    --ulimit nofile=65536:65536 \
     --add-host=host.docker.internal:host-gateway \
     -e OLLAMA_BASE_URL="http://host.docker.internal:${OLLAMA_PORT}" \
     -v open-webui:/app/backend/data \
