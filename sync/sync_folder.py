@@ -247,14 +247,10 @@ def add_openwebui(session, path):
     r.raise_for_status()
     file_id = r.json().get("id")
     if TARGET and file_id:
-        # Don't attach until the server has actually extracted the text. Large
-        # documents (hundreds of pages) take minutes, so scale the patience with
-        # the file size instead of using one short fixed timeout.
-        try:
-            mb = path.stat().st_size / 1e6
-        except OSError:
-            mb = 1.0
-        wait_s = int(min(1800, max(180, mb * 30)))
+        # Don't attach until the server has actually extracted the text. Big
+        # documents take minutes, so the patience is scaled by document weight
+        # (pages / text volume), not just bytes — see extraction_budget().
+        wait_s = extraction_budget(path)
         n_chars, waited = _wait_for_extraction(session, file_id, wait_s)
         if waited:
             if n_chars > 0:
@@ -268,8 +264,10 @@ def add_openwebui(session, path):
         # Retry the attach for a while before giving up.
         attempts = 15          # ~45s total
         for i in range(attempts):
+            # embedding a very large document can take many minutes server-side,
+            # so allow the same budget for the request itself
             resp = session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/file/add",
-                                json={"file_id": file_id}, timeout=300)
+                                json={"file_id": file_id}, timeout=max(300, wait_s))
             if resp.status_code == 200:
                 return file_id
             low = resp.text.lower()
@@ -385,6 +383,37 @@ def find_sidecar_text(img_path):
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+
+
+def pdf_page_count(path):
+    """Page count, or 0 if unknown."""
+    try:
+        import fitz
+        d = fitz.open(str(path))
+        n = d.page_count
+        d.close()
+        return n
+    except Exception:
+        return 0
+
+
+def extraction_budget(path):
+    """Seconds to allow for server-side extraction + embedding of one file.
+
+    Scaled by how much WORK the document represents — pages and text volume, not
+    just bytes on disk. A 2.5 MB / 40-page paper with 75k characters still needs
+    minutes of chunking and embedding, while a big-but-sparse scan needs less.
+    """
+    try:
+        mb = path.stat().st_size / 1e6
+    except OSError:
+        mb = 1.0
+    pages = chars = 0
+    if path.suffix.lower() == ".pdf":
+        pages = pdf_page_count(path)
+        chars = max(0, pdf_text_chars(path))
+    est = max(mb * 30, pages * 5, chars / 40)
+    return int(min(3600, max(180, est)))
 
 
 def pdf_text_chars(path, max_pages=12):
@@ -666,6 +695,15 @@ def main():
             if ext == ".md":
                 STATS["md_records"] += 1
             attach_figures(session, p, key, files, add_fn)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            # a very large document can exceed the request budget; report it
+            # clearly instead of letting the exception kill the whole run
+            print(f"[sync]   FAILED: {p.name}")
+            print(f"[sync]     the server took too long / dropped the connection ({type(e).__name__}).")
+            print(f"[sync]     this file is big ({p.stat().st_size/1e6:.0f} MB"
+                  + (f", {pdf_page_count(p)} pages" if ext == '.pdf' else "") + ") — "
+                  "try syncing it on its own, or split it into parts.")
+            failed.append(p.name)
         except requests.HTTPError as e:
             detail = ""
             try:
