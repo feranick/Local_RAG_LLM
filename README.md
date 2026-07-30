@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.28.1**
+**Version 2026.07.28.3**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -122,6 +122,12 @@ The scripts stand up the services; the last mile is done once in each web UI.
    - If you'd already uploaded documents, click **Reindex** afterward so they're re-embedded with this model.
    - (Optional) Chunk Size defaults to 1000 / overlap 100. For dense research papers, ~1500 / ~200 can improve retrieval; leave defaults otherwise.
 3. **Workspace → Knowledge → +** to create a collection and upload files (see "Chatting with your papers" below for how to use it).
+   - If you'll index large documents (books, theses, 100+ pages), also set
+     **Embedding Batch Size** to `32` and **Embedding Concurrent Requests** to `4`
+     under Admin Settings → Documents. The defaults (batch 1, unlimited
+     concurrency) open a connection to Ollama per chunk and fail on big files with
+     `Too many open files`. The setup script also launches the container with
+     `--ulimit nofile=65536:65536` for the same reason.
 4. Set Gemma as the default and hide the embedding model from the chat list:
    - **Default chat model:** your **Settings → General → Default Model** → `gemma4:26b` (so new chats start on Gemma, not the embedding model). Note this is *not* the "Local/External Task Model" under Admin → Settings → Interface — that's only for background tasks like title/tag generation; leave it on "Current Model".
    - **Hide the embedding model:** **Admin Panel → Settings → Models** → toggle `nomic-embed-text` off. It stays available for embedding documents; this just removes it from the chat dropdown so it can't be picked (or auto-selected) as a chat model.
@@ -181,7 +187,13 @@ When Open WebUI, AnythingLLM, or the add-ons ship new versions, refresh them wit
 ./update_local_rag.sh --check   # report which containers have newer images (no changes)
 ./update_local_rag.sh           # pull newer images and recreate those containers
 ./update_local_rag.sh --pull-models   # also re-pull installed Ollama models to latest tags
+./update_local_rag.sh --force-recreate  # recreate even if the image is unchanged
 ```
+
+`--force-recreate` is what you need after changing a container's **run flags**
+rather than its image — e.g. adding `--ulimit nofile=65536:65536` or an env var.
+Without it, a container whose image is already current is reported "up to date"
+and left running with its old flags.
 
 It only recreates a container when its image actually changed, preserves the data volumes / AnythingLLM storage, and reattaches containers to the `rag-net` network (Tika) if they were on it. Verify afterward with `./llm_stack_healthcheck.sh`.
 

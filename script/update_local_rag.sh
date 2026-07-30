@@ -23,6 +23,9 @@
 #   ./update_local_rag.sh --yes        # skip the confirmation prompt
 #   ./update_local_rag.sh --pull-models        # also re-pull installed models (latest tags)
 #   ./update_local_rag.sh --include-ollama     # ALSO update Ollama (see warning above)
+#   ./update_local_rag.sh --force-recreate     # recreate containers even if the image
+#                                             # is unchanged — use after changing run
+#                                             # flags (e.g. --ulimit, ports, env vars)
 # --------------------------------------------------------------------------
 
 set -uo pipefail
@@ -39,13 +42,14 @@ VISION_PORT=11435
 STORAGE_LOCATION="${STORAGE_LOCATION:-$REAL_HOME/anythingllm}"
 # ==========================================================================
 
-CHECK=0; ASSUME_YES=0; PULL_MODELS=0; INCLUDE_OLLAMA=0
+CHECK=0; ASSUME_YES=0; PULL_MODELS=0; INCLUDE_OLLAMA=0; FORCE_RECREATE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check)          CHECK=1; shift ;;
     --yes|-y)         ASSUME_YES=1; shift ;;
     --pull-models)    PULL_MODELS=1; shift ;;
     --include-ollama) INCLUDE_OLLAMA=1; shift ;;
+    --force-recreate) FORCE_RECREATE=1; shift ;;
     -h|--help)        grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -127,9 +131,12 @@ update_container() {
     warn "$c: could not pull $ref (network?) — skipping"
     return
   fi
-  if [ "$(running_imgid "$c")" = "$(ref_imgid "$ref")" ]; then
+  if [ "$(running_imgid "$c")" = "$(ref_imgid "$ref")" ] && [ "$FORCE_RECREATE" -eq 0 ]; then
     ok "$c is up to date"
     return
+  fi
+  if [ "$FORCE_RECREATE" -eq 1 ] && [ "$(running_imgid "$c")" = "$(ref_imgid "$ref")" ]; then
+    info "$c image unchanged, but --force-recreate was given (applies new run flags)"
   fi
   UPDATES_AVAILABLE=$((UPDATES_AVAILABLE+1))
   if [ "$CHECK" -eq 1 ]; then
@@ -155,6 +162,7 @@ UPDATES_AVAILABLE=0
 # ---- summary / confirm ----
 echo "${BOLD}Update local RAG stack${RESET}"
 echo "  containers: open-webui, anythingllm, tika (if present), ollama-vision (if present)"
+[ "$FORCE_RECREATE" -eq 1 ] && echo "  + --force-recreate: recreate even if the image is unchanged"
 [ "$PULL_MODELS" -eq 1 ]    && echo "  + re-pull installed Ollama models to latest tags"
 [ "$INCLUDE_OLLAMA" -eq 1 ] && echo "  ${RED}+ update Ollama via the generic installer (see warning)${RESET}"
 [ "$CHECK" -eq 1 ]          && echo "  (--check: report only, no changes)"
