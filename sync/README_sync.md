@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.11**
+**Version 2026.07.31.3**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -26,6 +26,39 @@ This is the companion to the main stack (setup, health check, update, uninstall)
 pip install requests          # required
 pip install pymupdf           # only for --describe-figures (renders PDFs/images)
 ```
+
+### Which files are picked up
+
+The watched folder is scanned **recursively**, so subfolders at any depth are
+included. Two groups of file types:
+
+| Group | Extensions | Notes |
+|-------|-----------|-------|
+| Documents (always) | `.pdf` `.txt` `.md` `.rst` `.html` `.htm` `.rtf` `.epub` | uploaded as-is; the server extracts the text |
+| Microsoft Office | `.docx` `.doc` `.pptx` `.ppt` `.xlsx` `.xls` | Word, PowerPoint and Excel are all indexed |
+| OpenDocument | `.odt` `.odp` `.ods` | |
+| Tabular / data | `.csv` `.tsv` `.json` | |
+| Images (only with `--describe-figures`) | `.png` `.jpg` `.jpeg` `.tif` `.tiff` `.webp` `.bmp` `.gif` | indexed as a vision-model description |
+
+Anything else (archives, videos, `.bib`, …) is skipped. `library_stats.py` reports
+how many were skipped with a breakdown by extension, and can name or export them:
+
+```bash
+python3 library_stats.py ~/papers --list-ignored              # print them
+python3 library_stats.py ~/papers --save-ignored skipped.txt  # write the list to a file
+```
+
+Worth a look after the first sync of a new folder — it's how you notice that, say,
+40 `.bib` files or a folder of `.h5` data was never indexed.
+
+Two caveats on Office and other non-PDF formats: whether the text is actually
+extracted is up to **Open WebUI's extraction engine**, not this script — the
+Default engine handles the common cases, and **Tika** (see the main README) is more
+tolerant, especially for legacy `.doc`/`.xls` and complex spreadsheets. If a file
+extracts to nothing you'll see a clear `400 … content is empty` failure for it
+rather than silence. And nesting is for your convenience only: the collection is
+**flat** (documents are stored by filename), so two same-named files in different
+subfolders become indistinguishable entries — give them distinct names.
 
 **Create the collection first.** Open WebUI / AnythingLLM won't auto-create it — make the Knowledge collection (Open WebUI: **Workspace → Knowledge → + New Knowledge**) or workspace *before* syncing, and point `TARGET` at its id. If you sync to a non-existent target, files upload but land in no collection and `#` shows nothing in Open WebUI.
 
@@ -224,9 +257,9 @@ Both instances share the same Ollama (so the same chat models are available) and
 the same GPU — expect them to queue behind each other under load. Remember the
 second container when uninstalling; `uninstall_local_rag.sh` doesn't know about it.
 
-Tip: keep each library's settings in a small wrapper script (e.g. `sync_reports.sh`)
-that exports the four variables and calls `sync_folder.py`, rather than editing the
-CONFIG block back and forth.
+Tip: keep one `.conf` per library (`papers.conf`, `reports.conf`) and select it with
+`--config`. Never edit settings inside `sync_folder.py` — there is nothing there to
+edit, and that's what makes upgrading the script a straight file copy.
 
 ### End-of-run summary
 
