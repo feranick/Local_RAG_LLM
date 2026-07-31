@@ -12,8 +12,10 @@ A per-file record (content hash + the remote id returned at upload) is kept in
 a small state file so repeat runs only touch what changed. Designed to be run
 repeatedly (cron/systemd).
 
-Configure by editing the CONFIG block below (so a bare `python3 sync_folder.py`
-works), or via environment variables which override those defaults:
+Configuration lives in a CONFIG FILE (sync_folder.conf) — nothing in this file
+needs editing, so upgrading the script never means re-customising it. Run
+`--init-config` to create a starter file. Every setting may also be given as an
+environment variable, which overrides the config file:
 
   RAG_BACKEND     anythingllm | openwebui        (default: openwebui)
   RAG_API_KEY     API key from the tool's UI     (or use the key file, below)
@@ -57,7 +59,7 @@ Endpoint names shift between versions; check each tool's /docs if a call fails
 Usage:
   pip install requests
   echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key   # one-time
-  # then, with TARGET filled in below:
+  python3 sync_folder.py --init-config          # then edit sync_folder.conf
   python3 sync_folder.py                       # add/update only
   python3 sync_folder.py --prune               # full mirror (also deletes)
   python3 sync_folder.py --ocr-fallback        # auto-OCR PDFs that extract empty
@@ -260,15 +262,15 @@ MIN_TEXT_CHARS = 400
 
 
 def init_config():
-    """Write a starter config file next to the script (or ./ if not writable)."""
-    for target in (pathlib.Path.cwd() / "sync_folder.conf",):
-        if target.exists():
-            print(f"[sync] {target} already exists — not overwriting.")
-            return
-        target.write_text(CONFIG_TEMPLATE)
-        print(f"[sync] wrote {target}\n"
-              f"[sync] edit TARGET / WATCH_DIR / STATE_FILE, then run: python3 {pathlib.Path(__file__).name}")
+    """Write a starter config file in the current directory."""
+    target = pathlib.Path.cwd() / "sync_folder.conf"
+    if target.exists():
+        print(f"[sync] {target} already exists — not overwriting.")
         return
+    target.write_text(CONFIG_TEMPLATE)
+    print(f"[sync] wrote {target}\n"
+          f"[sync] edit TARGET / WATCH_DIR / STATE_FILE, then run: "
+          f"python3 {pathlib.Path(__file__).name}")
 
 
 if "--init-config" in sys.argv:
@@ -292,6 +294,12 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
+    # create the parent directory if the configured STATE_FILE lives somewhere
+    # that doesn't exist yet — otherwise a long run would fail at the very end
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
 

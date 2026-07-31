@@ -14,7 +14,6 @@ Usage:
 
 import os
 import sys
-import json
 import hashlib
 import pathlib
 import requests

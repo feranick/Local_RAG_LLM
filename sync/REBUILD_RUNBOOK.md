@@ -1,12 +1,14 @@
 # Full library rebuild — runbook
 
-**Version 2026.07.28.1**
+**Version 2026.07.31.1**
 
 Every command, in order, with a verification checkpoint after each stage. Don't
 move to the next stage until its check passes — that's the whole point of the
 checkpoints, since a silent failure early on wastes hours downstream.
 
-Adjust these paths to your setup:
+For creating a *second, independent* library instead, see `NEW_INSTANCE_RUNBOOK.md`.
+
+Adjust these paths to your setup (they are yours already):
 
 ```bash
 SW=~/literature/flash-literature-mit-retrieved            # where the scripts live
@@ -14,6 +16,8 @@ OUT=$SW/access_all_papers           # proxify's output folder (named after the i
 LIB=~/literature/flash              # the folder the RAG sync watches
 CSV=$SW/access_all_papers.csv       # your metadata CSV
 KEY=$(cat ~/.rag_sync_key)
+SYNC=$SW/sync_folder_nicola.py         # your copy of sync_folder.py
+CONF=$SW/sync_folder.conf              # its configuration file (see README_sync.md)
 COLL=c411c9dc-289a-4e4c-bfa9-c5fab84d22c6      # Open WebUI knowledge collection id
 ```
 
@@ -24,9 +28,9 @@ COLL=c411c9dc-289a-4e4c-bfa9-c5fab84d22c6      # Open WebUI knowledge collection
 If a browser pass ran before, this says exactly what it achieved:
 
 ```bash
-python3 - <<'PY'
+python3 - <<PY
 import csv, collections, pathlib, sys
-p = pathlib.Path.home()/"Software/access_all_papers/browser_results.csv"
+p = pathlib.Path("$OUT/browser_results.csv")
 if not p.exists():
     print("browser_results.csv NOT FOUND -> fetch_browser.py never completed a run"); sys.exit()
 rows = list(csv.DictReader(p.open()))
@@ -46,9 +50,9 @@ PY
 
 ```bash
 cd $SW
-python3 proxify.py --version                      # expect 2026.07.27.3
+python3 proxify.py --version                      # expect today's version
 grep -c curl_result_is_good_enough fetch_browser.py   # expect 2 (patched)
-grep -c _wait_for_extraction sync_folder*.py          # expect 2 (patched sync)
+grep -c _wait_for_extraction $SYNC                    # expect 2 (patched sync)
 
 # Playwright must be importable AND have its Chromium build
 python3 -c "from playwright.sync_api import sync_playwright; print('playwright OK')"
@@ -159,14 +163,21 @@ Use `--list` to see which papers are still content-free.
 
 ## Stage 6 — Index
 
+Check the sync configuration first — settings now live in a config file, not inside
+the script, so upgrading `sync_folder.py` never means re-editing it:
+
+```bash
+cat $CONF     # TARGET, WATCH_DIR, KEY_FILE, STATE_FILE — all correct?
+```
+
 ```bash
 curl -sS -X POST "http://localhost:3000/api/v1/knowledge/$COLL/reset" \
   -H "Authorization: Bearer $KEY"; echo
 curl -sS -X DELETE "http://localhost:3000/api/v1/files/all" \
   -H "Authorization: Bearer $KEY"; echo
-rm -f ~/.rag_sync_state.json
+rm -f ~/.rag_sync_state.json        # the STATE_FILE named in $CONF
 
-python3 $SW/sync_folder_nicola.py --describe-figures --ocr-fallback
+python3 $SYNC --config $CONF --describe-figures --ocr-fallback
 ```
 
 Run it in `tmux`/`screen` — with figure descriptions this takes hours.
