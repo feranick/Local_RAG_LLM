@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.28.3**
+**Version 2026.07.28.5**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -25,6 +25,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `update_local_rag.sh` | Updates the stack when newer images exist — refreshes the containers (Open WebUI, AnythingLLM, and Tika/vision if present) while preserving data. `--check` reports without changing. |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
+| `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
 | `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in [`sync/README.md`](sync/README.md).** |
 
 ---
@@ -221,7 +222,7 @@ To test the setup script from a clean system:
 - **True fresh test:** `./uninstall_local_rag.sh --purge-data` then `./setup_local_rag.sh`. Note this re-downloads the models (~17 GB for `gemma4:26b` + `nomic-embed-text`).
 - **Fast iteration:** `./uninstall_local_rag.sh` (no purge) keeps the models on disk, so the re-run reuses them.
 
-The uninstaller also removes the optional add-ons if you set them up: the Tika container, the containerized vision Ollama (`ollama-vision`), the shared `rag-net` network, and (with `--purge-data`) its volume and the sync artifacts (`~/.rag_sync_state.json`, `~/.rag_sync_key`).
+The uninstaller also removes the optional add-ons if you set them up: the Tika container, the containerized vision Ollama (`ollama-vision`), the shared `rag-net` network, and (with `--purge-data`) its volume and the sync artifacts — all of them, including per-library variants (`~/.rag_sync_state*.json`, `~/.rag_sync_key*`).
 
 Docker and the NVIDIA Container Toolkit are never removed — they ship with DGX OS and other apps rely on them.
 

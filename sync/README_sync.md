@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.8**
+**Version 2026.07.28.11**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -90,6 +90,31 @@ python3 sync_folder.py --config ~/sync/reports.conf --describe-figures
 Give each one a **different `STATE_FILE`** — otherwise they overwrite each other's
 records and every run looks like a full re-sync.
 
+### The two side files: who creates them, and when
+
+| File | Config entry | Created by | When |
+|------|--------------|-----------|------|
+| API key (default `~/.rag_sync_key`) | `KEY_FILE` | **you**, by hand — the script only reads it | before the first sync; the run aborts immediately if it's missing |
+| Sync state (default `~/.rag_sync_state.json`) | `STATE_FILE` | **the script**, automatically | written at the end of every run; parent directories are created if needed |
+
+So the only one you make yourself is the key file:
+
+```bash
+echo 'sk-your-key' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key
+```
+
+Name them per library in the config file (or via `RAG_KEY_FILE` / `RAG_STATE_FILE`);
+if you leave them unset, the defaults above are used:
+
+```ini
+KEY_FILE   = ~/.rag_sync_papers_key
+STATE_FILE = ~/.rag_sync_papers_state.json
+```
+
+Deleting the state file is harmless — it just makes the next run treat every file
+as new (see [Re-syncing / resetting](#re-syncing--resetting)). `new_rag_instance.py`
+creates both files for a new instance automatically, named after it.
+
 **Finding the API key:**
 
 - **Open WebUI:** enable it first — **Admin Panel → Settings → Authentication → Enable API Key** (Save). Then create it — your **avatar → Settings → Account**, scroll to the bottom, create a key (starts with `sk-`). In v0.10.x the enable toggle is under Authentication, *not* General.
@@ -135,39 +160,54 @@ therefore share one embedding model, and changing it invalidates everything
 already indexed. Which route you take depends on whether you need a *different*
 embedding.
 
-### A. Second library, same embedding — one instance
+### A. Second library, SAME embedding — one instance
 
-Simple: create another Knowledge collection in the UI, then sync to it with its
-own target **and its own state file**:
+Order: create the collection in the UI, *then* write the config.
 
 ```bash
-cp sync_folder.conf reports.conf     # then edit TARGET / WATCH_DIR / STATE_FILE
+# 1. Workspace → Knowledge → + New Knowledge, then copy the id from its URL
+# 2. copy the config and edit TARGET, WATCH_DIR, STATE_FILE (KEY_FILE can stay —
+#    it's the same instance, so the same API key works)
+cp sync_folder.conf reports.conf
+
+# 3. put the documents in the folder you set as WATCH_DIR, then sync
 python3 sync_folder.py --config reports.conf --describe-figures
 ```
 
 A distinct `STATE_FILE` per library is not optional — without it both libraries
 write the same state file, so each run treats the other library's files as new.
+The same applies to `KEY_FILE` when the libraries live in **different instances**:
+API keys are per-instance, so each needs its own key file. Neither path is
+hardcoded anywhere — both are ordinary config entries, and the defaults
+(`~/.rag_sync_key`, `~/.rag_sync_state.json`) only apply when you don't set them.
 
 ### B. Second library with a DIFFERENT embedding — second instance
 
-Use **`new_rag_instance.py`**, which does the whole thing in one command: pulls
-the embedding model, launches a second container with every relevant setting
-**pre-applied as environment variables** (so there's nothing to configure in the
-UI), creates the admin account, creates the API key, creates the Knowledge
-collection, and writes a ready-to-run wrapper script:
+Order matters here too, but the other way round: **create the instance first**, and
+it writes the config file for you — there are no names to set by hand.
 
 ```bash
+# 1. create the instance. This also pulls the embedding model, creates the admin
+#    account, the API key file, the Knowledge collection, and <collection>.conf
 python3 new_rag_instance.py \
   --collection Reports --embed-model bge-m3 --port 3002 \
   --watch-dir ~/reports --email me@example.com
-```
 
-It prints the collection id and writes a matching **`reports.conf`**, so syncing
-the new library is one command — nothing to edit:
+# 2. put your documents in ~/reports
 
-```bash
+# 3. sync — the generated config already has the collection id, BASE_URL,
+#    KEY_FILE and STATE_FILE filled in
 python3 sync_folder.py --config reports.conf
 ```
+
+You only open `reports.conf` if you want to *change* something (turn off
+`DESCRIBE_FIGURES`, point `WATCH_DIR` elsewhere, …).
+
+Step-by-step with verification checkpoints: **`NEW_INSTANCE_RUNBOOK.md`**.
+
+Either way, check the first two lines of sync output before letting a long run
+proceed — they echo the config path, target, folder and state file, which is the
+cheapest way to catch a copy-paste mistake before anything is uploaded.
 
 Pre-set for you in the new instance: embedding engine (Ollama) and model, chunk
 size/overlap, embedding batch size 32, API keys enabled, new signups set to
@@ -239,7 +279,7 @@ curl -sS -X POST "http://localhost:3000/api/v1/knowledge/<COLLECTION_ID>/reset" 
   -H "Authorization: Bearer $KEY"; echo
 curl -sS -X DELETE "http://localhost:3000/api/v1/files/all" \
   -H "Authorization: Bearer $KEY"; echo
-rm -f ~/.rag_sync_state.json
+rm -f ~/.rag_sync_state.json      # the STATE_FILE of the library you're rebuilding
 
 python3 sync_folder.py --describe-figures --ocr-fallback
 ```
@@ -275,7 +315,7 @@ python3 sync_folder.py --force
 If you'd rather start fresh, delete the state file so nothing is remembered:
 
 ```bash
-rm ~/.rag_sync_state.json
+rm ~/.rag_sync_state.json      # or whatever STATE_FILE your config sets
 python3 sync_folder.py
 ```
 
@@ -297,7 +337,8 @@ curl -sS -X POST "http://localhost:3000/api/v1/knowledge/<COLLECTION_ID>/reset" 
 curl -sS -X DELETE "http://localhost:3000/api/v1/files/all" \
   -H "Authorization: Bearer $KEY"; echo
 
-# 3. clear local state and re-sync fresh
+# 3. clear THIS library's state and re-sync fresh
+#    (use the STATE_FILE from the config file you sync with, not necessarily this default)
 rm -f ~/.rag_sync_state.json
 python3 sync_folder.py --describe-figures
 ```
