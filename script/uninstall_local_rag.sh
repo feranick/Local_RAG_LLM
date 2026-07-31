@@ -41,8 +41,10 @@ VISION_CONTAINER="ollama-vision"
 VISION_VOLUME="ollama_vision"
 RAG_NETWORK="rag-net"
 # sync_folder.py artifacts (removed on --purge-data)
-SYNC_STATE="$REAL_HOME/.rag_sync_state.json"
-SYNC_KEY="$REAL_HOME/.rag_sync_key"
+# sync artifacts: the defaults AND any per-library variants
+# (e.g. .rag_sync_state_reports.json, .rag_sync_key_open-webui-2)
+SYNC_STATE_GLOB="$REAL_HOME/.rag_sync_state*.json"
+SYNC_KEY_GLOB="$REAL_HOME/.rag_sync_key*"
 # ==========================================================================
 
 PURGE_DATA=0
@@ -141,8 +143,8 @@ if [ "$PURGE_DATA" -eq 1 ]; then
   else
     warn "'$STORAGE_LOCATION' not found"
   fi
-  # sync_folder.py artifacts
-  for f in "$SYNC_STATE" "$SYNC_KEY"; do
+  # sync_folder.py artifacts — defaults plus any per-library variants
+  for f in $SYNC_STATE_GLOB $SYNC_KEY_GLOB; do
     [ -f "$f" ] && rm -f "$f" && ok "removed $f"
   done
 fi

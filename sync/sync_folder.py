@@ -888,7 +888,7 @@ def main():
                 print("[sync]         (auto-OCRs and retries), or OCR manually with ocrmypdf.")
             elif e.response is not None and e.response.status_code in (401, 403):
                 print("[sync]     hint: auth rejected -> check the API key (use the sk- key,")
-                print("[sync]       not the JWT token) in ~/.rag_sync_key.")
+                print(f"[sync]       not the JWT token) in {KEY_FILE}.")
             failed.append(p.name)
 
     # --- prune files deleted from the folder ---
