@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.28.5**
+**Version 2026.07.28.8**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -33,24 +33,62 @@ pip install pymupdf           # only for --describe-figures (renders PDFs/images
 
 ## Configuring the script
 
-Four settings. Three live in the **CONFIG block at the top of `sync_folder.py`**; the API key is kept in a separate file. Any matching environment variable overrides the in-file value.
+**Nothing is edited inside `sync_folder.py`.** All settings live in a config file,
+so upgrading the script never means re-customising it.
 
-| Setting | In-file variable | Where the value comes from |
-|---------|------------------|----------------------------|
-| Backend | `BACKEND` | `"openwebui"` or `"anythingllm"` |
-| Folder to sync | `WATCH_DIR` | a path — defaults to `~/papers` (see path note) |
-| Target collection | `TARGET` | the collection id / workspace slug (see "Finding the id") |
-| API key | (not in the file) | `~/.rag_sync_key` (see "Finding the API key") |
+Create one next to the script (or wherever you run from):
 
-**Editing paths (`WATCH_DIR`) — important:** this is Python, so do **not** use `$HOME` (Python won't expand it) and do **not** rename the variable to `RAG_WATCH_DIR` (that's only the env-var name it falls back to). The default already points at `~/papers`. To hardcode a different folder, change only the fallback path:
-
-```python
-# default — leave as-is for ~/papers:
-WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", str(pathlib.Path.home() / "papers")))
-
-# or hardcode an absolute path:
-WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", "/home/feranick/research/papers"))
+```bash
+python3 sync_folder.py --init-config     # writes a commented sync_folder.conf
 ```
+
+Then edit it — `TARGET`, `WATCH_DIR`, `STATE_FILE` are the ones that matter:
+
+```ini
+BACKEND    = openwebui
+WATCH_DIR  = ~/papers
+TARGET     = c411c9dc-289a-4e4c-bfa9-c5fab84d22c6
+BASE_URL   = http://localhost:3000
+KEY_FILE   = ~/.rag_sync_key
+STATE_FILE = ~/.rag_sync_state.json
+
+DESCRIBE_FIGURES = true
+OCR_FALLBACK     = true
+```
+
+`~` and `$HOME` are expanded, inline `#` comments are allowed, and quoting a value
+keeps it verbatim.
+
+**Where the config file is looked for** (first hit wins):
+
+1. `--config <path>` on the command line
+2. `$RAG_CONFIG`
+3. `./sync_folder.conf` — the directory you run from
+4. `sync_folder.conf` next to the script
+5. `~/.config/rag_sync/config`
+
+**Precedence for each individual setting:** an explicit **CLI flag** beats an
+**environment variable** (`RAG_<NAME>`), which beats the **config file**, which
+beats the built-in default. So the config file holds your normal setup, the env
+var is for a one-off, and a flag like `--no-describe-figures` overrides both.
+
+Every run prints what's actually in effect, which makes a wrong target or a shared
+state file obvious before anything is uploaded:
+
+```
+[sync] config: /home/you/sync/sync_folder.conf
+[sync] openwebui at http://localhost:3000 | target=c411c9dc-… | dir=/home/you/papers | state=.rag_sync_state.json
+```
+
+Running several libraries is then just several config files:
+
+```bash
+python3 sync_folder.py --config ~/sync/papers.conf  --describe-figures
+python3 sync_folder.py --config ~/sync/reports.conf --describe-figures
+```
+
+Give each one a **different `STATE_FILE`** — otherwise they overwrite each other's
+records and every run looks like a full re-sync.
 
 **Finding the API key:**
 
@@ -88,6 +126,67 @@ Environment variables override the in-file defaults for one-off runs:
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
 ```
+
+## Running a second library
+
+**Key constraint:** in Open WebUI the **embedding model is a global setting**
+(Admin → Documents), not per-collection. Two collections in the same instance
+therefore share one embedding model, and changing it invalidates everything
+already indexed. Which route you take depends on whether you need a *different*
+embedding.
+
+### A. Second library, same embedding — one instance
+
+Simple: create another Knowledge collection in the UI, then sync to it with its
+own target **and its own state file**:
+
+```bash
+cp sync_folder.conf reports.conf     # then edit TARGET / WATCH_DIR / STATE_FILE
+python3 sync_folder.py --config reports.conf --describe-figures
+```
+
+A distinct `STATE_FILE` per library is not optional — without it both libraries
+write the same state file, so each run treats the other library's files as new.
+
+### B. Second library with a DIFFERENT embedding — second instance
+
+Use **`new_rag_instance.py`**, which does the whole thing in one command: pulls
+the embedding model, launches a second container with every relevant setting
+**pre-applied as environment variables** (so there's nothing to configure in the
+UI), creates the admin account, creates the API key, creates the Knowledge
+collection, and writes a ready-to-run wrapper script:
+
+```bash
+python3 new_rag_instance.py \
+  --collection Reports --embed-model bge-m3 --port 3002 \
+  --watch-dir ~/reports --email me@example.com
+```
+
+It prints the collection id and writes a matching **`reports.conf`**, so syncing
+the new library is one command — nothing to edit:
+
+```bash
+python3 sync_folder.py --config reports.conf
+```
+
+Pre-set for you in the new instance: embedding engine (Ollama) and model, chunk
+size/overlap, embedding batch size 32, API keys enabled, new signups set to
+`pending`, the FD ulimit, and the `host.docker.internal` route to your existing
+Ollama. Useful flags: `--dry-run` (print the docker command only), `--name`,
+`--chunk-size`, `--batch-size`, `--skip-pull`.
+
+Doing it by hand instead is fine too — run the container with its own volume and
+`-e RAG_EMBEDDING_MODEL=…`, then create the account/key/collection in the UI and
+pass `RAG_BASE_URL`, `RAG_TARGET`, `RAG_KEY_FILE`, `RAG_STATE_FILE` to
+`sync_folder.py` yourself.
+
+Both instances share the same Ollama (so the same chat models are available) and
+the same GPU — expect them to queue behind each other under load. Remember the
+second container when uninstalling; `uninstall_local_rag.sh` doesn't know about it.
+
+Tip: keep each library's settings in a small wrapper script (e.g. `sync_reports.sh`)
+that exports the four variables and calls `sync_folder.py`, rather than editing the
+CONFIG block back and forth.
 
 ### End-of-run summary
 
@@ -274,6 +373,7 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | — | `RAG_BACKEND` | `openwebui` / `anythingllm` |
 | — | `RAG_TARGET` | collection id / workspace slug |
 | — | `RAG_API_KEY` / `RAG_KEY_FILE` | key value / path to key file (default `~/.rag_sync_key`) |
+| — | `RAG_STATE_FILE` | per-library sync state (default `~/.rag_sync_state.json`) — **required when syncing more than one library** |
 | — | `RAG_WATCH_DIR` | folder to sync |
 | — | `RAG_BASE_URL` | override the tool's base URL |
 | — | `RAG_FIGURE_MODEL` | vision model tag (default `llava`) |

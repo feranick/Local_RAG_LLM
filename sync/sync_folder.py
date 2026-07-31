@@ -18,6 +18,9 @@ works), or via environment variables which override those defaults:
   RAG_BACKEND     anythingllm | openwebui        (default: openwebui)
   RAG_API_KEY     API key from the tool's UI     (or use the key file, below)
   RAG_KEY_FILE    path to a file holding the key (default: ~/.rag_sync_key)
+  RAG_STATE_FILE  per-library sync state (default: ~/.rag_sync_state.json).
+                  REQUIRED when you sync more than one folder/collection — give
+                  each library its own file or they clobber each other.
   RAG_WATCH_DIR   folder to sync                  (default: ~/papers)
   RAG_BASE_URL    override the default base URL
   RAG_TARGET      AnythingLLM workspace slug  OR  Open WebUI knowledge id
@@ -80,62 +83,125 @@ try:
 except ImportError:
     sys.exit("Missing dependency: pip install requests")
 
-# ----------------------------- config -----------------------------------
-# Hard-code your settings here so you can just run:  python3 sync_folder.py
-# Any environment variable, if set, overrides the value here.
+# ============================ configuration ==============================
+# NOTHING needs to be edited in this file. Settings come from a config file so
+# that upgrading this script never means re-customising it.
 #
-#   BACKEND  : "openwebui" or "anythingllm"
-#   WATCH_DIR: folder to sync
-#   TARGET   : Open WebUI knowledge id  /  AnythingLLM workspace slug
-#              (the collection must already exist — the script won't create it)
-BACKEND   = os.environ.get("RAG_BACKEND", "openwebui").lower()
-WATCH_DIR = pathlib.Path(os.environ.get("RAG_WATCH_DIR", str(pathlib.Path.home() / "papers")))
-TARGET    = os.environ.get("RAG_TARGET", "")   # <-- paste your knowledge id / workspace slug here
+# Resolution order for every setting (first hit wins):
+#     1. environment variable   RAG_<NAME>        (handy for one-off overrides)
+#     2. config file entry      <NAME> = value
+#     3. the built-in default below
+#
+# The config file is looked for in this order:
+#     --config <path>            (explicit)
+#     $RAG_CONFIG                (environment)
+#     ./sync_folder.conf         (the directory you run from)
+#     <dir of this script>/sync_folder.conf
+#     ~/.config/rag_sync/config
+#
+# Write a starter file with:   python3 sync_folder.py --init-config
+# -------------------------------------------------------------------------
 
-# API KEY — kept OUT of this file for safety. Resolved in this order:
-#   1) RAG_API_KEY environment variable
-#   2) a key file (default ~/.rag_sync_key) containing just the key on one line
-# Create the key file once:   echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key
-KEY_FILE  = pathlib.Path(os.environ.get("RAG_KEY_FILE", str(pathlib.Path.home() / ".rag_sync_key")))
-API_KEY   = os.environ.get("RAG_API_KEY", "")
+def _find_config():
+    for i, arg in enumerate(sys.argv):
+        if arg == "--config" and i + 1 < len(sys.argv):
+            return pathlib.Path(sys.argv[i + 1]).expanduser()
+        if arg.startswith("--config="):
+            return pathlib.Path(arg.split("=", 1)[1]).expanduser()
+    if os.environ.get("RAG_CONFIG"):
+        return pathlib.Path(os.environ["RAG_CONFIG"]).expanduser()
+    for cand in (pathlib.Path.cwd() / "sync_folder.conf",
+                 pathlib.Path(__file__).resolve().parent / "sync_folder.conf",
+                 pathlib.Path.home() / ".config" / "rag_sync" / "config"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _load_config(path):
+    """Parse a simple KEY = value file. '#'/';' comment lines and [sections] are
+    ignored, quotes are stripped, and a leading RAG_ on a key is optional."""
+    out = {}
+    if not path or not path.is_file():
+        return out
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;[" or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().upper()
+        if k.startswith("RAG_"):
+            k = k[4:]
+        v = v.strip()
+        if v[:1] in ('"', "'") and v.count(v[0]) >= 2:
+            v = v[1:v.index(v[0], 1)]              # quoted: take it verbatim
+        else:
+            v = re.split(r"\s+[#;]", v, maxsplit=1)[0].strip()   # drop inline comment
+        # allow ~ and $HOME in path-ish values
+        if v.startswith("~") or v.startswith("$") or "/" in v:
+            v = os.path.expandvars(os.path.expanduser(v))
+        out[k] = v
+    return out
+
+
+CONFIG_PATH = _find_config()
+CONFIG = _load_config(CONFIG_PATH)
+_TRUE = ("1", "true", "yes", "on")
+
+
+def cfg(name, default=None):
+    """env RAG_<NAME>  >  config file <NAME>  >  default"""
+    v = os.environ.get("RAG_" + name)
+    if v is None or v == "":
+        v = CONFIG.get(name)
+    return default if v is None or v == "" else v
+
+
+def cfg_flag(name, cli_on=None, cli_off=None, default=False):
+    """A boolean. An explicit CLI flag always wins, then env, then config file."""
+    if cli_on and cli_on in sys.argv:
+        return True
+    if cli_off and cli_off in sys.argv:
+        return False
+    v = cfg(name)
+    return (str(v).lower() in _TRUE) if v is not None else default
+
+
+BACKEND   = str(cfg("BACKEND", "openwebui")).lower()
+WATCH_DIR = pathlib.Path(cfg("WATCH_DIR", str(pathlib.Path.home() / "papers"))).expanduser()
+TARGET    = cfg("TARGET", "")          # knowledge id (Open WebUI) / workspace slug
+
+# API KEY — never store it in the config file if you can avoid it; point at a
+# 0600 key file instead:  echo 'sk-xxxx' > ~/.rag_sync_key && chmod 600 ~/.rag_sync_key
+KEY_FILE  = pathlib.Path(cfg("KEY_FILE", str(pathlib.Path.home() / ".rag_sync_key"))).expanduser()
+API_KEY   = cfg("API_KEY", "")
 if not API_KEY and KEY_FILE.is_file():
     API_KEY = KEY_FILE.read_text().strip()
 
-# prune = delete from the collection when the file disappears from the folder.
-# enabled by --prune on the command line or RAG_PRUNE=1 in the environment.
-PRUNE = ("--prune" in sys.argv) or (os.environ.get("RAG_PRUNE", "").lower() in ("1", "true", "yes"))
+# prune = also delete from the collection when a file disappears from the folder
+PRUNE = cfg_flag("PRUNE", "--prune", "--no-prune")
 
-# force = re-sync every file even if unchanged (re-upload + re-embed). Old copies
-# are removed first via their tracked remote id, so no duplicates. Use after
-# changing the embedding model, chunk settings, or extraction engine.
-FORCE = ("--force" in sys.argv) or (os.environ.get("RAG_FORCE", "").lower() in ("1", "true", "yes"))
+# force = re-sync every file even if unchanged (old copy removed first)
+FORCE = cfg_flag("FORCE", "--force", "--no-force")
 
-# ocr fallback = if a PDF fails because the server extracted no text, OCR it
-# locally (ocrmypdf) and retry once. enabled by --ocr-fallback or RAG_OCR_FALLBACK=1.
-# Requires the `ocrmypdf` command to be installed (sudo apt install ocrmypdf).
-OCR_FALLBACK = ("--ocr-fallback" in sys.argv) or (os.environ.get("RAG_OCR_FALLBACK", "").lower() in ("1", "true", "yes"))
+# ocr fallback = OCR a PDF locally (ocrmypdf) and retry when the server got no text
+OCR_FALLBACK = cfg_flag("OCR_FALLBACK", "--ocr-fallback", "--no-ocr-fallback")
 
-# describe figures = for each PDF, render its pages and have a local vision model
-# (via Ollama) describe any figures/plots, then upload those descriptions as a
-# companion document so figure content becomes retrievable. Text-based RAG can't
-# "see" plots; this bridges that gap. Enabled by --describe-figures / RAG_DESCRIBE_FIGURES=1.
-# Requires PyMuPDF (pip install pymupdf) and a vision model pulled in Ollama.
-DESCRIBE_FIGURES = ("--describe-figures" in sys.argv) or (os.environ.get("RAG_DESCRIBE_FIGURES", "").lower() in ("1", "true", "yes"))
-FIGURE_MODEL = os.environ.get("RAG_FIGURE_MODEL", "llava")   # vision model (Western; loads on the Spark's Ollama build)
-OLLAMA_URL   = os.environ.get("RAG_OLLAMA_URL", "http://localhost:11434")
-FIGURE_DPI   = int(os.environ.get("RAG_FIGURE_DPI", "150"))
+# describe figures = render pages/images and index a vision-model description
+DESCRIBE_FIGURES = cfg_flag("DESCRIBE_FIGURES", "--describe-figures", "--no-describe-figures")
+FIGURE_MODEL = cfg("FIGURE_MODEL", "llava")     # loads on the Spark's Ollama build
+OLLAMA_URL   = cfg("OLLAMA_URL", "http://localhost:11434")
+FIGURE_DPI   = int(cfg("FIGURE_DPI", 150))
 
-# preflight = before uploading, warn if a file has little extractable text (a
-# JavaScript-shell HTML, a scanned/no-text-layer PDF, or a near-empty doc). It
-# only warns — it never blocks the upload. Disable with --no-preflight.
-PREFLIGHT = ("--no-preflight" not in sys.argv) and (os.environ.get("RAG_NO_PREFLIGHT", "").lower() not in ("1", "true", "yes"))
-MIN_TEXT_CHARS = int(os.environ.get("RAG_MIN_TEXT_CHARS", "400"))
+# preflight low-text warning (on by default; never blocks an upload)
+PREFLIGHT = not cfg_flag("NO_PREFLIGHT", "--no-preflight", "--preflight")
+MIN_TEXT_CHARS = int(cfg("MIN_TEXT_CHARS", 400))
 
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
     "openwebui":   "http://localhost:3000",
 }
-BASE_URL = os.environ.get("RAG_BASE_URL", DEFAULT_URLS.get(BACKEND, ""))
+BASE_URL = cfg("BASE_URL", DEFAULT_URLS.get(BACKEND, ""))
 
 # document types uploaded directly (text is extracted server-side)
 EXTS = {".pdf", ".txt", ".md", ".docx", ".doc", ".epub", ".csv", ".html", ".rtf", ".pptx"}
@@ -144,7 +210,11 @@ EXTS = {".pdf", ".txt", ".md", ".docx", ".doc", ".epub", ".csv", ".html", ".rtf"
 # vision-model description of the image (the image itself has no extractable text).
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
 
-STATE_FILE = pathlib.Path.home() / ".rag_sync_state.json"
+# Per-library state. Give each library its OWN state file (RAG_STATE_FILE) when you
+# sync more than one folder/collection, otherwise they overwrite each other's
+# records and every run looks like a full re-sync.
+STATE_FILE = pathlib.Path(cfg(
+    "STATE_FILE", str(pathlib.Path.home() / ".rag_sync_state.json"))).expanduser()
 
 # per-type tallies for the end-of-run summary (what actually made it in)
 STATS = collections.Counter()
@@ -153,6 +223,57 @@ STATS = collections.Counter()
 
 def die(msg: str):
     sys.exit(f"[sync] ERROR: {msg}")
+
+
+CONFIG_TEMPLATE = """# sync_folder.conf — configuration for sync_folder.py
+#
+# Keep this file next to the script (or in the directory you run from) so that
+# updating sync_folder.py never overwrites your settings.
+# Every entry may also be given as an environment variable: RAG_<NAME>.
+
+# --- what to sync, and where to ------------------------------------------
+BACKEND    = openwebui                 # openwebui | anythingllm
+WATCH_DIR  = ~/papers                  # folder to sync
+TARGET     =                           # knowledge collection id / workspace slug
+BASE_URL   = http://localhost:3000     # the instance to sync into
+
+# --- credentials ---------------------------------------------------------
+KEY_FILE   = ~/.rag_sync_key           # file containing the sk-... key (chmod 600)
+# API_KEY  =                           # (discouraged: prefer KEY_FILE)
+
+# --- per-library state (MUST differ between libraries) -------------------
+STATE_FILE = ~/.rag_sync_state.json
+
+# --- behaviour (true/false; a CLI flag still overrides) ------------------
+PRUNE            = false               # remove from collection when deleted locally
+FORCE            = false               # re-sync everything even if unchanged
+OCR_FALLBACK     = false               # OCR a PDF locally if the server got no text
+DESCRIBE_FIGURES = false               # index vision descriptions of figures/images
+NO_PREFLIGHT     = false               # true = skip the low-text warning
+
+# --- figure descriptions -------------------------------------------------
+FIGURE_MODEL   = llava
+OLLAMA_URL     = http://localhost:11434
+FIGURE_DPI     = 150
+MIN_TEXT_CHARS = 400
+"""
+
+
+def init_config():
+    """Write a starter config file next to the script (or ./ if not writable)."""
+    for target in (pathlib.Path.cwd() / "sync_folder.conf",):
+        if target.exists():
+            print(f"[sync] {target} already exists — not overwriting.")
+            return
+        target.write_text(CONFIG_TEMPLATE)
+        print(f"[sync] wrote {target}\n"
+              f"[sync] edit TARGET / WATCH_DIR / STATE_FILE, then run: python3 {pathlib.Path(__file__).name}")
+        return
+
+
+if "--init-config" in sys.argv:
+    init_config()
+    sys.exit(0)
 
 
 def load_state() -> dict:
@@ -595,8 +716,13 @@ def build_image_doc(session, img_path):
 
 
 def main():
+    # show which configuration is actually in effect — makes a wrong TARGET or a
+    # shared STATE_FILE obvious before anything is uploaded
+    print(f"[sync] config: {CONFIG_PATH if CONFIG_PATH else '(none found — using defaults/env)'}")
+    print(f"[sync] {BACKEND} at {BASE_URL} | target={TARGET or '(unset)'} | "
+          f"dir={WATCH_DIR} | state={STATE_FILE.name}")
     if not API_KEY:
-        die("RAG_API_KEY is not set")
+        die("no API key — set KEY_FILE in the config file (or RAG_API_KEY)")
     if BACKEND not in ADAPTERS:
         die(f"RAG_BACKEND must be 'anythingllm' or 'openwebui', got '{BACKEND}'")
     if not WATCH_DIR.is_dir():
