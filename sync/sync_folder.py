@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.7"
+__version__ = "2026.08.01.8"
 
 import os
 import re
@@ -1023,6 +1023,16 @@ def cmd_status():
               f"[{b.get('idx','?')}/{b.get('total','?')}] {b.get('file','?')} "
               f"({b.get('stage','?')}).")
         print("[sync]   just re-run the same command; it resumes from the state file.")
+    elif age < 600:
+        # No heartbeat, yet the state file is moving: something IS syncing, but it
+        # was started from a version without heartbeats (they arrived in
+        # 2026.08.01.6). Don't claim it's idle.
+        print(f"[sync] a run appears ACTIVE (state written {age/60:.1f} min ago) but it "
+              "publishes no heartbeat,")
+        print(f"[sync]   so it was started from an older copy of this script "
+              f"(heartbeats were added in 2026.08.01.6; this is {__version__}).")
+        print("[sync]   Confirm with:  pgrep -af sync_folder")
+        print("[sync]   Restart it with the current script to get live per-file status.")
     else:
         print(f"[sync] no run in progress (state last written {age/60:.1f} min ago).")
     print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")

@@ -27,7 +27,7 @@ Usage:
   python3 new_rag_instance.py --dry-run          # show the docker command only
 """
 
-__version__ = "2026.07.31.1"
+__version__ = "2026.07.31.2"
 
 import os
 import sys
@@ -198,24 +198,60 @@ def main():
 
     # ---------- 5. API key ----------
     step("5/6  API key")
-    api_key = ""
-    for path in ("/api/v1/auths/api_key", "/api/v1/auths/api-key"):
-        try:
-            r = s.post(f"{base}{path}", timeout=30)
-            if r.ok:
-                api_key = (r.json() or {}).get("api_key", "")
-                if api_key:
-                    break
-        except Exception:
-            pass
+
+    def _mint_key():
+        for path in ("/api/v1/auths/api_key", "/api/v1/auths/api-key"):
+            try:
+                r = s.post(f"{base}{path}", timeout=30)
+                if r.ok:
+                    k = (r.json() or {}).get("api_key", "")
+                    if k:
+                        return k
+            except Exception:
+                pass
+        return ""
+
+    api_key = _mint_key()
+
+    if not api_key:
+        # The personal-API-key feature can be off server-side (the UI then shows no
+        # "API Keys" section at all). Try to switch it on via the admin config, then
+        # retry. Endpoint names vary between versions, so several are attempted.
+        info("API keys appear to be disabled — trying to enable them…")
+        for path in ("/api/v1/auths/admin/config", "/api/v1/auths/admin/config/api_key"):
+            try:
+                cur = s.get(f"{base}{path}", timeout=20)
+                payload = cur.json() if cur.ok and isinstance(cur.json(), dict) else {}
+            except Exception:
+                payload = {}
+            for key_name in ("enable_api_key", "ENABLE_API_KEY", "api_key"):
+                payload[key_name] = True
+            try:
+                if s.post(f"{base}{path}", json=payload, timeout=20).ok:
+                    api_key = _mint_key()
+                    if api_key:
+                        ok("enabled API keys via the admin config")
+                        break
+            except Exception:
+                pass
+            if api_key:
+                break
+
     if api_key:
         key_file.write_text(api_key + "\n")
         key_file.chmod(0o600)
         ok(f"API key created and saved to {key_file}")
     else:
-        warn("could not create the API key via the API.")
-        warn(f"Do it once in the UI: {base} → Settings → Account → API Keys,")
-        warn(f"then: echo 'sk-...' > {key_file} && chmod 600 {key_file}")
+        # Last resort: the login JWT works as a bearer token for the same endpoints,
+        # so the library can be synced immediately. It expires, unlike an sk- key.
+        key_file.write_text(tok + "\n")
+        key_file.chmod(0o600)
+        warn("could not create a permanent API key on this build.")
+        warn(f"Wrote the login token to {key_file} instead — syncing works now, but")
+        warn("the token EXPIRES, so replace it with a real key when convenient:")
+        warn(f"  1) {base} → Admin → Settings → Authentication → Enable API Key (Save)")
+        warn(f"  2) Settings → Account → API Keys → create (starts with sk-)")
+        warn(f"  3) echo 'sk-...' > {key_file}")
 
     # ---------- 6. knowledge collection ----------
     step("6/6  Knowledge collection")
