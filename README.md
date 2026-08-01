@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.28.5**
+**Version 2026.07.31.3**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -25,6 +25,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `update_local_rag.sh` | Updates the stack when newer images exist — refreshes the containers (Open WebUI, AnythingLLM, and Tika/vision if present) while preserving data. `--check` reports without changing. |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
+| `manage_models.py` | Browse, add, test, list, remove or set the default **LLM** on a running stack. `--browse`/`--tags` read the available models live from the Ollama library; every add is followed by a real load test, since a model can download and still fail to run on this Ollama build. |
 | `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
 | `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in [`sync/README.md`](sync/README.md).** |
 
@@ -90,6 +91,72 @@ Pass any model explicitly (skips that prompt), or `--no-prompt` to skip all menu
 ```
 
 You can also edit the `CONFIG` block at the top of the script (ports, storage path, model names).
+
+---
+
+## Changing or adding an LLM later
+
+**Swapping the chat model needs no re-indexing.** The chat LLM is used only when
+answering a question; only the *embedding* model is part of the stored vectors. And
+because every Open WebUI instance talks to the same Ollama, a newly pulled model
+shows up in all of them at once.
+
+### Finding out what to install
+
+The hard part isn't the swap, it's knowing the exact name. That list is read **live
+from the Ollama library** each time, not baked into the script (a hardcoded list
+would be wrong within months):
+
+```bash
+python3 manage_models.py --browse               # what's available right now
+python3 manage_models.py --browse gemma         # ...matching a term
+python3 manage_models.py --tags gemma4          # the exact installable tags + sizes
+```
+
+`--browse` shows each model's parameter sizes, capabilities (vision / thinking /
+embedding), tag count and popularity, marks the ones you already have, and hides
+**cloud-only** models — those run on Ollama's servers, not on your Spark.
+
+`--tags NAME` is the one to run before `--add`. It prints every tag with its
+download size and context window, flags anything larger than the ~110 GB this
+machine can hold, and hides the `*-mlx*` tags (Apple-silicon builds) and `*cloud*`
+tags, which cannot run here at all. Add `--all` to either command to see everything.
+
+```
+  tag                                size     ctx  notes
+    gemma4:latest                  9.6 GB    128K  vision
+  ✔ gemma4:26b                      18 GB    256K  vision
+    gemma4:31b-it-q8_0              34 GB    256K  vision
+    gemma4:26b-a4b-it-bf16          52 GB    256K  vision
+```
+
+Both commands need internet access. Offline, `--suggest` prints a small built-in
+starting list — useful, but explicitly marked as the thing that ages.
+
+### Installing and switching
+
+```bash
+python3 manage_models.py --add gemma4:31b       # pull + verify it actually loads
+python3 manage_models.py --list                 # installed models, sizes, roles
+python3 manage_models.py --loaded               # what's in memory right now
+python3 manage_models.py --remove gemma4:12b    # reclaim disk space
+```
+
+Then pick it in the UI's model dropdown, or make it the default with
+**Settings → General → Default Model** (`--set-default TAG` attempts this via the
+API and falls back to telling you where to click).
+
+The verification step matters on this hardware: `--add` always follows the pull with
+a real generate/embeddings call, because a model can download perfectly and still
+fail to run — `llama3.2-vision` needs the `mllama` architecture, which the Spark's
+Ollama build doesn't have. The script refuses to suggest that one and explains why.
+
+**Changing the *embedding* model is a different matter** — it invalidates every
+stored vector and forces a full re-sync, or better, a second instance:
+
+```bash
+python3 manage_models.py --embedding-warning    # what's involved, both options
+```
 
 ---
 
