@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.5"
+__version__ = "2026.08.01.7"
 
 import os
 import re
@@ -357,14 +357,57 @@ def _save_on_exit():
 atexit.register(_save_on_exit)
 
 
-def maybe_checkpoint(state, every=10):
-    """Persist progress every `every` processed files."""
+def maybe_checkpoint(state, every=10, seconds=120):
+    """Persist progress every `every` files OR every `seconds`, whichever first.
+
+    The time limit matters: one 300-page PDF being figure-described can take an
+    hour, and a purely count-based checkpoint would leave the state file looking
+    untouched the whole time.
+    """
     maybe_checkpoint.n = getattr(maybe_checkpoint, "n", 0) + 1
-    if maybe_checkpoint.n % every == 0:
+    last = getattr(maybe_checkpoint, "t", 0)
+    if maybe_checkpoint.n % every == 0 or (time.time() - last) > seconds:
+        maybe_checkpoint.t = time.time()
         try:
             save_state(state)
         except Exception:
             pass
+
+
+# --- heartbeat: what is the run doing RIGHT NOW ---------------------------
+# A small file updated continuously (per file, and per page during figure
+# description) so `--status` can distinguish "working hard on a big document"
+# from "died", which the state file's timestamp alone cannot do.
+HEARTBEAT_FILE = STATE_FILE.with_suffix(".progress")
+_PROGRESS = {}
+
+
+def beat(stage=""):
+    try:
+        d = dict(_PROGRESS)
+        d.update(pid=os.getpid(), updated=time.time(), stage=stage)
+        HEARTBEAT_FILE.write_text(json.dumps(d))
+    except OSError:
+        pass
+
+
+def read_beat():
+    try:
+        return json.loads(HEARTBEAT_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # exists, owned by someone else
+        return True
+    except (ValueError, TypeError, OSError):
+        return False
 
 
 def file_hash(p: pathlib.Path) -> str:
@@ -455,6 +498,7 @@ def _file_in_collection(session, file_id):
 
 
 def add_openwebui(session, path):
+    beat(f"uploading {path.name}")
     with open(path, "rb") as f:
         r = session.post(f"{BASE_URL}/api/v1/files/",
                          files={"file": (path.name, f)}, timeout=300)
@@ -465,7 +509,9 @@ def add_openwebui(session, path):
         # documents take minutes, so the patience is scaled by document weight
         # (pages / text volume), not just bytes — see extraction_budget().
         wait_s = extraction_budget(path)
+        beat(f"server extracting text from {path.name}")
         n_chars, waited = _wait_for_extraction(session, file_id, wait_s)
+        beat(f"server embedding {path.name}")
         if waited:
             if n_chars > 0:
                 print(f"      (waited for text extraction: {n_chars} chars)")
@@ -807,10 +853,20 @@ def build_figures_doc(session, pdf_path):
         print(f"[sync]   could not open {pdf_path.name} for figure rendering: {e}")
         return None, 0
 
-    print(f"[sync]   describing figures in {pdf_path.name} ({doc.page_count} pages, "
+    n_pages = doc.page_count
+    print(f"[sync]   describing figures in {pdf_path.name} ({n_pages} pages, "
           f"model={FIGURE_MODEL})…")
     sections = []
-    for i in range(doc.page_count):
+    t_fig = time.time()
+    for i in range(n_pages):
+        beat(f"figures page {i + 1}/{n_pages} of {pdf_path.name}")
+        # A long PDF can occupy the vision model for an hour; without this the run
+        # looks frozen. Report periodically once it's clear this is a long one.
+        if n_pages >= 20 and i and i % 10 == 0:
+            el = time.time() - t_fig
+            print(f"[sync]     … page {i}/{n_pages} "
+                  f"({el/60:.0f} min, ~{(n_pages - i) * el / i / 60:.0f} min left "
+                  f"on this file)")
         try:
             pix = doc[i].get_pixmap(dpi=FIGURE_DPI)
             b64 = base64.b64encode(pix.tobytes("png")).decode()
@@ -947,11 +1003,28 @@ def cmd_status():
     if ghosts:
         print(f"[sync] {ghosts} tracked entr(ies) no longer on disk "
               f"(--prune removes them from the collection)")
-    print(f"[sync] state last written {age/60:.1f} min ago"
-          + ("  (a sync looks active)" if age < 300 else
-             "  (no recent activity — probably not running)"))
-    if age < 300 and done and total > done:
-        print("[sync] note: an in-progress run reports its own live ETA in its output.")
+
+    # Liveness comes from the heartbeat + the PID, NOT from the state file's age:
+    # a single big PDF under --describe-figures can legitimately take an hour, and
+    # judging by the state timestamp alone would call a healthy run dead.
+    b = read_beat()
+    if b and pid_alive(b.get("pid")):
+        quiet = time.time() - b.get("updated", 0)
+        on_file = time.time() - b.get("file_started", b.get("updated", time.time()))
+        print(f"[sync] RUNNING (pid {b['pid']}) — [{b.get('idx','?')}/{b.get('total','?')}] "
+              f"{b.get('file','?')}")
+        print(f"[sync]   currently: {b.get('stage','?')}"
+              f"  ({on_file/60:.1f} min on this file)")
+        if quiet > 900:
+            print(f"[sync]   ! no heartbeat for {quiet/60:.0f} min — this one may be "
+                  "genuinely stuck; check `ollama ps` and the run's own output.")
+    elif b:
+        print(f"[sync] NOT running — process {b.get('pid')} is gone; it stopped while on "
+              f"[{b.get('idx','?')}/{b.get('total','?')}] {b.get('file','?')} "
+              f"({b.get('stage','?')}).")
+        print("[sync]   just re-run the same command; it resumes from the state file.")
+    else:
+        print(f"[sync] no run in progress (state last written {age/60:.1f} min ago).")
     print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")
 
 
@@ -977,6 +1050,24 @@ def main():
     if not TARGET:
         print("[sync] WARNING: RAG_TARGET not set — files upload but won't be "
               "attached to a workspace/collection (and can't be pruned).")
+
+    # Refuse to run twice against the same library. Two concurrent syncs share one
+    # STATE_FILE (last writer wins, so progress is lost), race each other into
+    # "Duplicate content detected", and double the load on one GPU.
+    other = read_beat()
+    if other and pid_alive(other.get("pid")) and other.get("pid") != os.getpid():
+        if "--allow-parallel" in sys.argv:
+            print(f"[sync] WARNING: pid {other['pid']} is already syncing this library; "
+                  "continuing anyway because --allow-parallel was given.")
+        else:
+            die(f"another sync is already running for this library (pid {other['pid']}, "
+                f"on [{other.get('idx','?')}/{other.get('total','?')}] "
+                f"{other.get('file','?')}).\n"
+                f"       Check it with:  python3 {pathlib.Path(__file__).name} "
+                f"--config <conf> --status\n"
+                f"       Stop it with:   kill {other['pid']}\n"
+                f"       Two runs would overwrite each other's state file "
+                f"({STATE_FILE.name}). Use --allow-parallel only for different libraries.")
 
     add_fn, remove_fn = ADAPTERS[BACKEND]
     session = requests.Session()
@@ -1044,6 +1135,10 @@ def main():
         key = str(p)
         is_update = bool(entry and entry.get("remote_id"))
         pos = f"[{idx}/{n_work}]"
+        _PROGRESS.update(idx=idx, total=n_work, file=p.name,
+                         file_started=time.time(), started=t_start,
+                         config=str(CONFIG_PATH or ""))
+        beat("starting")
         # ETA from the files already finished, so the numbers refer to real work
         done_n = idx - 1
         if PROGRESS_EVERY and done_n and done_n % PROGRESS_EVERY == 0:
@@ -1264,6 +1359,10 @@ def main():
 
     save_state(state)
     _LIVE_STATE.pop("state", None)   # saved cleanly; no exit-handler save needed
+    try:
+        HEARTBEAT_FILE.unlink()      # nothing is running any more
+    except OSError:
+        pass
     # "Processed" is the honest denominator: every file this run attempted. It is
     # reported alongside the categories that were deliberately NOT attempted
     # (unchanged, images without --describe-figures) so the folder count adds up.

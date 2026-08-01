@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.5**
+**Version 2026.08.01.6**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -128,7 +128,8 @@ records and every run looks like a full re-sync.
 | File | Config entry | Created by | When |
 |------|--------------|-----------|------|
 | API key (default `~/.rag_sync_key`) | `KEY_FILE` | **you**, by hand — the script only reads it | before the first sync; the run aborts immediately if it's missing |
-| Sync state (default `~/.rag_sync_state.json`) | `STATE_FILE` | **the script**, automatically | checkpointed every 10 files, on exit, and at the end of every run; parent directories are created if needed |
+| Sync state (default `~/.rag_sync_state.json`) | `STATE_FILE` | **the script**, automatically | checkpointed every 10 files *or* 2 minutes, on exit, and at the end of every run; parent directories are created if needed |
+| Heartbeat (`<STATE_FILE>.progress`) | — follows `STATE_FILE` | **the script**, automatically | written continuously while running, deleted on a clean finish; read by `--status` |
 
 So the only one you make yourself is the key file:
 
@@ -220,11 +221,27 @@ python3 sync_folder.py --config papers.conf --status
 ```
 [sync] [###############.........................] 561/1481 processed (38%)
 [sync] folder holds 1490 file(s): 561 processed, 920 to go, 9 image(s) ignored (needs --describe-figures)
-[sync] state last written 0.3 min ago  (a sync looks active)
+[sync] RUNNING (pid 48213) — [562/1481] Chen_Thesis_2021.pdf
+[sync]   currently: figures page 143/312 of Chen_Thesis_2021.pdf  (24.7 min on this file)
 ```
 
-A stale "last written" time is the useful signal here: if it hasn't moved in a while
-and no run is active, the sync died and can simply be re-run — it resumes.
+Liveness is decided by a heartbeat file plus the process id — **not** by how recently
+the state file changed. That distinction matters: one 300-page PDF under
+`--describe-figures` can hold the run for an hour, which looks identical to a hang if
+you only watch timestamps. If the process is gone you get the position it died at:
+
+```
+[sync] NOT running — process 48213 is gone; it stopped while on [562/1481] Chen_Thesis_2021.pdf (server embedding).
+[sync]   just re-run the same command; it resumes from the state file.
+```
+
+The heartbeat lives next to the state file (`<state>.progress`) and is deleted on a
+clean finish. Long figure runs also report themselves inline every 10 pages:
+
+```
+[sync]   describing figures in Chen_Thesis_2021.pdf (312 pages, model=llava)…
+[sync]     … page 140/312 (24 min, ~30 min left on this file)
+```
 
 For a long run, start it under `tmux`/`screen` so closing the SSH session doesn't
 kill it, or log it and tail the log:
