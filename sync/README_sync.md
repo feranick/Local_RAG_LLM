@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.6**
+**Version 2026.08.01.7**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -236,7 +236,21 @@ you only watch timestamps. If the process is gone you get the position it died a
 ```
 
 The heartbeat lives next to the state file (`<state>.progress`) and is deleted on a
-clean finish. Long figure runs also report themselves inline every 10 pages:
+clean finish. It also acts as a **lock**: starting a second sync against the same
+library is refused, because both runs would write the same state file (last writer
+wins, so progress is lost) and race each other into false "Duplicate content
+detected" errors.
+
+```
+[sync] ERROR: another sync is already running for this library (pid 48213, on [562/1481] Chen_Thesis.pdf).
+       Stop it with:   kill 48213
+```
+
+A heartbeat left behind by a crashed run doesn't block anything — the PID is checked,
+not just the file. Syncing two *different* libraries at once is fine (separate state
+files); `--allow-parallel` overrides the check if you're certain.
+
+Long figure runs also report themselves inline every 10 pages:
 
 ```
 [sync]   describing figures in Chen_Thesis_2021.pdf (312 pages, model=llava)…
@@ -511,6 +525,7 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | `--no-preflight` | `RAG_NO_PREFLIGHT=1` | disable the pre-upload low-text warning |
 | `--no-convert-legacy` | `RAG_CONVERT_LEGACY=0` | don't convert `.doc`/`.ppt`/`.xls` before upload (on by default; needs libreoffice or antiword) |
 | `--status` | — | print how far along this library is, then exit (safe during a run) |
+| `--allow-parallel` | — | permit a second concurrent run against the same library (normally refused) |
 | — | `RAG_PROGRESS_EVERY` | progress/ETA line every N files (default `25`, `0` = off) |
 | — | `RAG_MIN_TEXT_CHARS` | HTML low-text threshold in chars (default 400) |
 | — | `RAG_BACKEND` | `openwebui` / `anythingllm` |
