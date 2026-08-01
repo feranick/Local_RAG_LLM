@@ -65,9 +65,10 @@ Usage:
   python3 sync_folder.py --ocr-fallback        # auto-OCR PDFs that extract empty
   python3 sync_folder.py --describe-figures    # also index vision descriptions of plots
   python3 sync_folder.py --force               # re-sync everything (re-embed), no duplicates
+  python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.1"
+__version__ = "2026.08.01.3"
 
 import os
 import re
@@ -208,6 +209,9 @@ MIN_TEXT_CHARS = int(cfg("MIN_TEXT_CHARS", 400))
 # "the server is still embedding" messages.
 ATTACH_TIMEOUT = int(cfg("ATTACH_TIMEOUT", 900))
 
+# Print a "progress N/total, ~M min left" line every N files (0 = never).
+PROGRESS_EVERY = int(cfg("PROGRESS_EVERY", 25))
+
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
     "openwebui":   "http://localhost:3000",
@@ -277,8 +281,9 @@ OLLAMA_URL     = http://localhost:11434
 FIGURE_DPI     = 150
 MIN_TEXT_CHARS = 400
 
-# --- server patience -----------------------------------------------------
+# --- server patience & progress ------------------------------------------
 ATTACH_TIMEOUT = 900                   # seconds to let ONE embed request run
+PROGRESS_EVERY = 25                    # progress/ETA line every N files (0 = off)
 """
 
 
@@ -814,11 +819,58 @@ def build_image_doc(session, img_path):
     return out
 
 
+def cmd_status():
+    """How far along is this library? Safe to run WHILE a sync is in progress.
+
+    Compares the state file against the folder. Because state is checkpointed
+    every 10 files, the count during a run is accurate to within ~10 files.
+    """
+    print(f"[sync] status for {WATCH_DIR}")
+    print(f"[sync] state file: {STATE_FILE}")
+    if not STATE_FILE.is_file():
+        print("[sync] no state file yet — nothing has been synced with this config.")
+        return
+    st = load_state()
+    tracked = st.get("files", {})
+    if not WATCH_DIR.is_dir():
+        die(f"watch dir does not exist: {WATCH_DIR}")
+    # The denominator is what THIS configuration can index, so it matches what a
+    # run would attempt. Anything excluded is named rather than silently dropped.
+    wanted = EXTS | (IMAGE_EXTS if DESCRIBE_FIGURES else set())
+    on_disk_all = [p for p in WATCH_DIR.rglob("*")
+                   if p.is_file() and p.suffix.lower() in (EXTS | IMAGE_EXTS)]
+    cand = [p for p in on_disk_all if p.suffix.lower() in wanted]
+    ignored = len(on_disk_all) - len(cand)
+    keys = {str(p) for p in cand}
+    done = len(keys & set(tracked))
+    total = len(cand)
+    ghosts = len(set(tracked) - keys)
+    age = time.time() - STATE_FILE.stat().st_mtime
+    pct = (done / total * 100) if total else 0
+    bar = "#" * int(pct / 2.5) + "." * (40 - int(pct / 2.5))
+    print(f"[sync] [{bar}] {done}/{total} processed ({pct:.0f}%)")
+    print(f"[sync] folder holds {len(on_disk_all)} file(s): "
+          f"{done} processed, {total - done} to go"
+          + (f", {ignored} image(s) ignored (needs --describe-figures)" if ignored else ""))
+    if ghosts:
+        print(f"[sync] {ghosts} tracked entr(ies) no longer on disk "
+              f"(--prune removes them from the collection)")
+    print(f"[sync] state last written {age/60:.1f} min ago"
+          + ("  (a sync looks active)" if age < 300 else
+             "  (no recent activity — probably not running)"))
+    if age < 300 and done and total > done:
+        print("[sync] note: an in-progress run reports its own live ETA in its output.")
+    print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")
+
+
 def main():
     # show which configuration is actually in effect — makes a wrong TARGET or a
     # shared STATE_FILE obvious before anything is uploaded
     if "--version" in sys.argv:
         print(f"sync_folder.py {__version__}")
+        return
+    if "--status" in sys.argv:
+        cmd_status()
         return
     print(f"[sync] v{__version__} | config: "
           f"{CONFIG_PATH if CONFIG_PATH else '(none found — using defaults/env)'}")
@@ -852,26 +904,54 @@ def main():
     failed = []   # names of files that couldn't be added
 
     # --- add / update files currently on disk ---
-    on_disk = set()
-    for p in sorted(WATCH_DIR.rglob("*")):
-        ext = p.suffix.lower()
-        if not p.is_file() or ext not in (EXTS | IMAGE_EXTS):
+    # Work out the whole to-do list FIRST, so every line can be numbered and the
+    # run can report a percentage and an ETA. Hashing up front costs no extra work
+    # overall (each file was hashed inside the loop before), it just front-loads it.
+    print(f"[sync] scanning {WATCH_DIR} …")
+    # every file the folder offers (images included, so PRUNE doesn't drop image
+    # docs added by an earlier --describe-figures run)
+    all_cand = [p for p in sorted(WATCH_DIR.rglob("*"))
+                if p.is_file() and p.suffix.lower() in (EXTS | IMAGE_EXTS)]
+    on_disk = {str(p) for p in all_cand}
+    work, n_img_skipped, n_unchanged = [], 0, 0
+    for p in all_cand:
+        if p.suffix.lower() in IMAGE_EXTS and not DESCRIBE_FIGURES:
+            n_img_skipped += 1   # not indexable without a vision pass
             continue
-        key = str(p)
-        on_disk.add(key)
         digest = file_hash(p)
-        entry = files.get(key)
+        entry = files.get(str(p))
         if entry and entry.get("hash") == digest and not FORCE:
-            continue  # unchanged (use --force to re-sync anyway)
+            n_unchanged += 1     # unchanged (use --force to re-sync anyway)
+            continue
+        work.append((p, digest, entry))
+    n_work = len(work)
+    print(f"[sync] {len(all_cand)} file(s) on disk: {n_work} to process, "
+          f"{n_unchanged} unchanged"
+          + (f", {n_img_skipped} image(s) ignored (needs --describe-figures)"
+             if n_img_skipped else ""))
+    t_start = time.time()
+
+    for idx, (p, digest, entry) in enumerate(work, 1):
+        ext = p.suffix.lower()
+        key = str(p)
         is_update = bool(entry and entry.get("remote_id"))
+        pos = f"[{idx}/{n_work}]"
+        # ETA from the files already finished, so the numbers refer to real work
+        done_n = idx - 1
+        if PROGRESS_EVERY and done_n and done_n % PROGRESS_EVERY == 0:
+            el = time.time() - t_start
+            left = (n_work - done_n) * (el / done_n)
+            print(f"[sync] --- {done_n}/{n_work} done ({done_n/n_work*100:.0f}%) — "
+                  f"{el/60:.0f} min elapsed, ~{left/60:.0f} min left "
+                  f"at {el/done_n:.1f}s/file ---")
 
         # --- standalone image files: index a vision description of the image ---
         if ext in IMAGE_EXTS:
             if not DESCRIBE_FIGURES:
-                print(f"[sync] skipping image {p.name} "
+                print(f"[sync] {pos} skipping image {p.name} "
                       "(run with --describe-figures to index images)")
                 continue
-            print(f"[sync] {'updating' if is_update else 'adding'} image {p.name} …")
+            print(f"[sync] {pos} {'updating' if is_update else 'adding'} image {p.name} …")
             try:
                 if is_update:
                     remove_fn(session, entry["remote_id"])
@@ -917,7 +997,7 @@ def main():
             continue
 
         # --- document files (pdf / text) ---
-        print(f"[sync] {'updating' if is_update else 'adding'} {p.name} …")
+        print(f"[sync] {pos} {'updating' if is_update else 'adding'} {p.name} …")
         pf = preflight_text_warning(p)
         if pf:
             print(f"[sync]   ! {pf}")
@@ -1034,9 +1114,18 @@ def main():
 
     save_state(state)
     _LIVE_STATE.pop("state", None)   # saved cleanly; no exit-handler save needed
-    print(f"[sync] done — {added} added, {updated} updated, {removed} removed, "
-          f"{dup} already-present, {len(files)} tracked total"
+    # "Processed" is the honest denominator: every file this run attempted. It is
+    # reported alongside the categories that were deliberately NOT attempted
+    # (unchanged, images without --describe-figures) so the folder count adds up.
+    processed = added + updated + dup + len(failed)
+    print(f"[sync] done — processed {processed}/{n_work} to-do file(s): "
+          f"{added} added, {updated} updated, {dup} already-present, "
+          f"{len(failed)} failed, {removed} removed"
           f"{' (prune ON)' if PRUNE else ''}.")
+    print(f"[sync] folder holds {len(all_cand)} file(s): {n_work} to process, "
+          f"{n_unchanged} unchanged"
+          + (f", {n_img_skipped} image(s) ignored" if n_img_skipped else "")
+          + f"; {len(files)} tracked in state.")
 
     # ---- what actually made it in, by type -----------------------------
     md = STATS.get("md_records", 0)
@@ -1049,7 +1138,8 @@ def main():
     if other_text:
         print(f"         other text documents      : {other_text}")
     print(f"         standalone images         : {STATS.get('images', 0)}"
-          + ("" if DESCRIBE_FIGURES else "   (images need --describe-figures)"))
+          + (f"   ({n_img_skipped} ignored — needs --describe-figures)"
+             if n_img_skipped else ""))
     if DESCRIBE_FIGURES:
         print(f"         figure-description docs   : {STATS.get('figure_docs', 0)}"
               f"  (from {STATS.get('figure_pages', 0)} page(s) containing figures)")

@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.1**
+**Version 2026.08.01.3**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -183,6 +183,55 @@ Environment variables override the in-file defaults for one-off runs:
 
 ```bash
 RAG_BACKEND=anythingllm RAG_TARGET=papers python3 sync_folder.py
+```
+
+### Following progress
+
+The run works out the full to-do list before uploading anything, so every line is
+numbered and an ETA appears every 25 files (`PROGRESS_EVERY`, 0 to switch off):
+
+```
+[sync] 1482 file(s) on disk: 430 to process, 1051 unchanged, 1 image(s) ignored (needs --describe-figures)
+[sync] [12/430] adding Chen_FlashSintering_2019.pdf …
+[sync] --- 25/430 done (6%) — 14 min elapsed, ~228 min left at 33.6s/file ---
+```
+
+The denominator is *work to do*, not the whole folder. Nothing is hidden, though —
+the closing lines reconcile the two, so a count that looks short is explained rather
+than mysterious:
+
+```
+[sync] done — processed 430/430 to-do file(s): 425 added, 0 updated, 3 already-present, 2 failed, 0 removed.
+[sync] folder holds 1490 file(s): 430 to process, 1051 unchanged, 9 image(s) ignored; 1481 tracked in state.
+```
+
+"Processed" means *attempted this run* — added + updated + already-present + failed.
+The categories deliberately **not** attempted are named on the second line:
+unchanged files, and images when `--describe-figures` is off.
+
+**From another terminal**, `--status` reads the state file and reports the same
+thing without touching the server. It's safe to run while a sync is going, and
+accurate to within ~10 files (the checkpoint interval):
+
+```bash
+python3 sync_folder.py --config papers.conf --status
+```
+
+```
+[sync] [###############.........................] 561/1481 processed (38%)
+[sync] folder holds 1490 file(s): 561 processed, 920 to go, 9 image(s) ignored (needs --describe-figures)
+[sync] state last written 0.3 min ago  (a sync looks active)
+```
+
+A stale "last written" time is the useful signal here: if it hasn't moved in a while
+and no run is active, the sync died and can simply be re-run — it resumes.
+
+For a long run, start it under `tmux`/`screen` so closing the SSH session doesn't
+kill it, or log it and tail the log:
+
+```bash
+python3 sync_folder.py --config papers.conf --describe-figures 2>&1 | tee ~/sync.log
+grep -c '^\[sync\] \[' ~/sync.log     # files attempted so far
 ```
 
 ## Running a second library
@@ -443,6 +492,8 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | `--ocr-fallback` | `RAG_OCR_FALLBACK=1` | OCR a PDF locally and retry when the server extracts no text |
 | `--describe-figures` | `RAG_DESCRIBE_FIGURES=1` | describe PDF figures + standalone images with a vision model |
 | `--no-preflight` | `RAG_NO_PREFLIGHT=1` | disable the pre-upload low-text warning |
+| `--status` | — | print how far along this library is, then exit (safe during a run) |
+| — | `RAG_PROGRESS_EVERY` | progress/ETA line every N files (default `25`, `0` = off) |
 | — | `RAG_MIN_TEXT_CHARS` | HTML low-text threshold in chars (default 400) |
 | — | `RAG_BACKEND` | `openwebui` / `anythingllm` |
 | — | `RAG_TARGET` | collection id / workspace slug |
