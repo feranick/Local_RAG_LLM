@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.07.31.3**
+**Version 2026.08.01.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -128,7 +128,7 @@ records and every run looks like a full re-sync.
 | File | Config entry | Created by | When |
 |------|--------------|-----------|------|
 | API key (default `~/.rag_sync_key`) | `KEY_FILE` | **you**, by hand — the script only reads it | before the first sync; the run aborts immediately if it's missing |
-| Sync state (default `~/.rag_sync_state.json`) | `STATE_FILE` | **the script**, automatically | written at the end of every run; parent directories are created if needed |
+| Sync state (default `~/.rag_sync_state.json`) | `STATE_FILE` | **the script**, automatically | checkpointed every 10 files, on exit, and at the end of every run; parent directories are created if needed |
 
 So the only one you make yourself is the key file:
 
@@ -453,10 +453,36 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | — | `RAG_FIGURE_MODEL` | vision model tag (default `llava`) |
 | — | `RAG_OLLAMA_URL` | Ollama URL for figure calls (default `http://localhost:11434`) |
 | — | `RAG_FIGURE_DPI` | page render DPI for the vision model (default `150`) |
+| — | `RAG_ATTACH_TIMEOUT` | seconds to let one server-side embed request run (default `900`) |
 
 ---
 
 ## Sync troubleshooting
+
+**`ReadTimeout` on `/api/v1/knowledge/…/file/add` — the run stops with a traceback.**
+Embedding happens server-side on the shared GPU, so one document can take longer
+than the request budget — especially while a second library is syncing or a chat
+model is loaded. Two things changed to handle it:
+
+- A timeout is now treated as **ambiguous rather than fatal**. The server may finish
+  after the client gives up, so the script waits, asks the collection whether the
+  file actually landed, and only re-posts if it didn't (up to 3 tries, doubling the
+  budget). A file that landed is recorded, so it won't be uploaded twice.
+- The budget itself is configurable and defaults to 900 s:
+
+  ```ini
+  ATTACH_TIMEOUT = 1800        # in your .conf, for a busy machine
+  ```
+
+If a single file still can't get through, it's reported and the run continues; the
+file isn't recorded, so the next run retries it. Reduce contention by not syncing
+two libraries at once, and by lowering **Admin → Settings → Documents → Embedding
+Batch Size** (32) and **Concurrent Requests** (4).
+
+**A crash or Ctrl-C used to lose the whole session's progress.** State is now
+checkpointed every 10 files and again on exit, so a re-run resumes instead of
+re-uploading everything. You'll see `[sync] progress saved to …` if a run ends
+abnormally.
 
 **Open WebUI is stuck on the "OI" splash screen / reload loop.**
 First diagnose — the two causes have completely different fixes:

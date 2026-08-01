@@ -67,11 +67,14 @@ Usage:
   python3 sync_folder.py --force               # re-sync everything (re-embed), no duplicates
 """
 
+__version__ = "2026.08.01.1"
+
 import os
 import re
 import sys
 import json
 import time
+import atexit
 import base64
 import shutil
 import hashlib
@@ -199,6 +202,12 @@ FIGURE_DPI   = int(cfg("FIGURE_DPI", 150))
 PREFLIGHT = not cfg_flag("NO_PREFLIGHT", "--no-preflight", "--preflight")
 MIN_TEXT_CHARS = int(cfg("MIN_TEXT_CHARS", 400))
 
+# How long to let the server work on ONE attach/embed request. Embedding happens
+# server-side on the shared GPU, so a big document — or any document while another
+# library is syncing — can exceed the old 300 s. Raise this if you still see
+# "the server is still embedding" messages.
+ATTACH_TIMEOUT = int(cfg("ATTACH_TIMEOUT", 900))
+
 DEFAULT_URLS = {
     "anythingllm": "http://localhost:3001",
     "openwebui":   "http://localhost:3000",
@@ -206,7 +215,16 @@ DEFAULT_URLS = {
 BASE_URL = cfg("BASE_URL", DEFAULT_URLS.get(BACKEND, ""))
 
 # document types uploaded directly (text is extracted server-side)
-EXTS = {".pdf", ".txt", ".md", ".docx", ".doc", ".epub", ".csv", ".html", ".rtf", ".pptx"}
+EXTS = {
+    # documents
+    ".pdf", ".txt", ".md", ".rst", ".html", ".htm", ".rtf", ".epub",
+    # Microsoft Office (modern + legacy)
+    ".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls",
+    # OpenDocument
+    ".odt", ".odp", ".ods",
+    # tabular / data
+    ".csv", ".tsv", ".json",
+}
 
 # standalone image types: indexed only with --describe-figures, by uploading a
 # vision-model description of the image (the image itself has no extractable text).
@@ -258,6 +276,9 @@ FIGURE_MODEL   = llava
 OLLAMA_URL     = http://localhost:11434
 FIGURE_DPI     = 150
 MIN_TEXT_CHARS = 400
+
+# --- server patience -----------------------------------------------------
+ATTACH_TIMEOUT = 900                   # seconds to let ONE embed request run
 """
 
 
@@ -301,6 +322,36 @@ def save_state(state: dict):
     except OSError:
         pass
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+# --- crash/interrupt safety ----------------------------------------------
+# A sync can run for hours. State used to be written only at the very end, so
+# any crash (or Ctrl-C) threw away the whole session and the next run re-uploaded
+# everything. Now progress is checkpointed periodically and on exit.
+_LIVE_STATE = {}
+
+
+def _save_on_exit():
+    st = _LIVE_STATE.get("state")
+    if st:
+        try:
+            save_state(st)
+            print(f"[sync] progress saved to {STATE_FILE}")
+        except Exception:
+            pass
+
+
+atexit.register(_save_on_exit)
+
+
+def maybe_checkpoint(state, every=10):
+    """Persist progress every `every` processed files."""
+    maybe_checkpoint.n = getattr(maybe_checkpoint, "n", 0) + 1
+    if maybe_checkpoint.n % every == 0:
+        try:
+            save_state(state)
+        except Exception:
+            pass
 
 
 def file_hash(p: pathlib.Path) -> str:
@@ -369,6 +420,27 @@ def _wait_for_extraction(session, file_id, timeout_s=180):
     return -1, waited
 
 
+def _file_in_collection(session, file_id):
+    """True/False if the collection can be read, else None (unknown).
+
+    Used after a request timeout: the server may well have finished embedding
+    after our client gave up waiting, and re-attaching a file that already
+    landed would either duplicate it or look like a hard failure.
+    """
+    if not (TARGET and file_id):
+        return None
+    try:
+        r = session.get(f"{BASE_URL}/api/v1/knowledge/{TARGET}", timeout=60)
+        if not r.ok:
+            return None
+        d = r.json() or {}
+        ids = {f.get("id") for f in (d.get("files") or []) if isinstance(f, dict)}
+        ids |= set((d.get("data") or {}).get("file_ids") or [])
+        return file_id in ids
+    except Exception:
+        return None
+
+
 def add_openwebui(session, path):
     with open(path, "rb") as f:
         r = session.post(f"{BASE_URL}/api/v1/files/",
@@ -392,11 +464,30 @@ def add_openwebui(session, path):
         # "content is empty" 400 may just mean processing isn't finished.
         # Retry the attach for a while before giving up.
         attempts = 15          # ~45s total
+        budget = max(ATTACH_TIMEOUT, wait_s)   # server-side embed can take minutes
+        timeouts = 0
         for i in range(attempts):
             # embedding a very large document can take many minutes server-side,
-            # so allow the same budget for the request itself
-            resp = session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/file/add",
-                                json={"file_id": file_id}, timeout=max(300, wait_s))
+            # so allow a generous budget for the request itself
+            try:
+                resp = session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/file/add",
+                                    json={"file_id": file_id}, timeout=budget)
+            except (requests.Timeout, requests.ConnectionError) as e:
+                # AMBIGUOUS: the embed may still be running server-side and may
+                # yet succeed. Don't fail, and don't blindly re-post — wait, then
+                # ask the collection whether the file landed.
+                timeouts += 1
+                print(f"      (no reply after {budget}s — the server is still embedding; "
+                      f"{type(e).__name__})")
+                time.sleep(30)
+                if _file_in_collection(session, file_id):
+                    print("      (it completed server-side despite the timeout)")
+                    return file_id
+                if timeouts >= 3:
+                    raise
+                budget = min(budget * 2, 3600)
+                print(f"      (retrying with a {budget}s budget)")
+                continue
             if resp.status_code == 200:
                 return file_id
             low = resp.text.lower()
@@ -726,7 +817,11 @@ def build_image_doc(session, img_path):
 def main():
     # show which configuration is actually in effect — makes a wrong TARGET or a
     # shared STATE_FILE obvious before anything is uploaded
-    print(f"[sync] config: {CONFIG_PATH if CONFIG_PATH else '(none found — using defaults/env)'}")
+    if "--version" in sys.argv:
+        print(f"sync_folder.py {__version__}")
+        return
+    print(f"[sync] v{__version__} | config: "
+          f"{CONFIG_PATH if CONFIG_PATH else '(none found — using defaults/env)'}")
     print(f"[sync] {BACKEND} at {BASE_URL} | target={TARGET or '(unset)'} | "
           f"dir={WATCH_DIR} | state={STATE_FILE.name}")
     if not API_KEY:
@@ -751,6 +846,7 @@ def main():
         state = {"files": {}}
     state["backend"], state["target"] = BACKEND, TARGET
     files = state.setdefault("files", {})
+    _LIVE_STATE["state"] = state    # so progress survives a crash or Ctrl-C
 
     added = updated = removed = dup = 0
     failed = []   # names of files that couldn't be added
@@ -791,7 +887,17 @@ def main():
                 updated += is_update
                 added += not is_update
                 STATS["images"] += 1
+                maybe_checkpoint(state)
                 print("[sync]   + image description added")
+            except (requests.Timeout, requests.ConnectionError) as e:
+                # the server never answered (busy GPU / slow embed). Report and
+                # move on — one stalled file must not abort a multi-hour run.
+                print(f"[sync]   FAILED: {p.name}")
+                print(f"[sync]     the server took too long or dropped the connection "
+                      f"({type(e).__name__}); it may still finish server-side.")
+                print(f"[sync]     re-run later, or raise ATTACH_TIMEOUT "
+                      f"(currently {ATTACH_TIMEOUT}s) in the config.")
+                failed.append(p.name)
             except requests.HTTPError as e:
                 detail = ""
                 try:
@@ -829,14 +935,17 @@ def main():
             if ext == ".md":
                 STATS["md_records"] += 1
             attach_figures(session, p, key, files, add_fn)
+            maybe_checkpoint(state)
         except (requests.Timeout, requests.ConnectionError) as e:
             # a very large document can exceed the request budget; report it
             # clearly instead of letting the exception kill the whole run
             print(f"[sync]   FAILED: {p.name}")
             print(f"[sync]     the server took too long / dropped the connection ({type(e).__name__}).")
-            print(f"[sync]     this file is big ({p.stat().st_size/1e6:.0f} MB"
-                  + (f", {pdf_page_count(p)} pages" if ext == '.pdf' else "") + ") — "
-                  "try syncing it on its own, or split it into parts.")
+            print(f"[sync]     size: {p.stat().st_size/1e6:.0f} MB"
+                  + (f", {pdf_page_count(p)} pages" if ext == '.pdf' else ""))
+            print(f"[sync]     the embed may still finish server-side; re-run later. If this "
+                  f"recurs, raise ATTACH_TIMEOUT (now {ATTACH_TIMEOUT}s) in the config,")
+            print("[sync]     sync this file on its own, or split it into parts.")
             failed.append(p.name)
         except requests.HTTPError as e:
             detail = ""
@@ -924,6 +1033,7 @@ def main():
                   f"collection. Run with --prune to remove them.")
 
     save_state(state)
+    _LIVE_STATE.pop("state", None)   # saved cleanly; no exit-handler save needed
     print(f"[sync] done — {added} added, {updated} updated, {removed} removed, "
           f"{dup} already-present, {len(files)} tracked total"
           f"{' (prune ON)' if PRUNE else ''}.")
