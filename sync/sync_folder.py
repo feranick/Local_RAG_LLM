@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.9"
+__version__ = "2026.08.01.10"
 
 import os
 import re
@@ -845,20 +845,30 @@ def make_converted_copy(src: pathlib.Path):
     return None, ""
 
 
-def has_nothing_to_index(path, min_chars=5):
+def has_nothing_to_index(path, min_chars=5, min_html_chars=20):
     """True when a file demonstrably holds no text at all.
 
     Uploading such a file is pointless: the server extracts nothing and answers
     400 "content provided is empty", which used to be logged as a FAILURE and made
     the whole run exit non-zero. An empty file isn't a failure — there is simply
     nothing to index — so it's skipped locally and reported separately.
-    Only applied to plain-text formats, where reading the file IS the extraction;
-    PDFs may legitimately need OCR and are left to the server / --ocr-fallback.
+
+    HTML gets its own test on the *rendered* text rather than the raw bytes: a
+    frameset, a JS-shell page or a help-system stub is thousands of bytes of markup
+    around zero readable words, so a byte-length check would wave it through.
+
+    PDFs are never judged here — an image-only PDF has no text *yet*, which is what
+    --ocr-fallback exists for.
     """
     try:
         if path.stat().st_size == 0:
             return True
-        if path.suffix.lower() in TEXTLIKE_EXTS:
+        ext = path.suffix.lower()
+        if ext in (".html", ".htm"):
+            raw = path.read_text(errors="ignore")
+            body = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", " ", raw)
+            return len(_WS_RE.sub(" ", _TAG_RE.sub(" ", body)).strip()) < min_html_chars
+        if ext in TEXTLIKE_EXTS:
             return len(path.read_text(errors="ignore").strip()) < min_chars
     except OSError:
         pass
@@ -1165,6 +1175,10 @@ def main():
         else:
             print(f"[sync] {n_legacy} legacy Office file(s) will be converted locally "
                   "before upload.")
+    if OCR_FALLBACK and shutil.which("ocrmypdf") is None:
+        print("[sync] ! OCR_FALLBACK is enabled but 'ocrmypdf' is not installed, so "
+              "text-less PDFs cannot be recovered:")
+        print("[sync]     sudo apt install -y ocrmypdf jbig2enc")
     t_start = time.time()
 
     for idx, (p, digest, entry) in enumerate(work, 1):
@@ -1240,8 +1254,10 @@ def main():
         # An empty text file can't be indexed by anyone; skip it here rather than
         # letting the server reject it as a "failure" on every single run.
         if has_nothing_to_index(p):
-            print(f"[sync] {pos} skipping {p.name} — the file contains no text "
-                  f"({p.stat().st_size} bytes)")
+            why = ("only markup, no readable text (frameset / JS shell / help stub)"
+                   if ext in (".html", ".htm")
+                   else f"the file contains no text ({p.stat().st_size} bytes)")
+            print(f"[sync] {pos} skipping {p.name} — {why}")
             if is_update:
                 try:
                     remove_fn(session, entry["remote_id"])
@@ -1355,13 +1371,28 @@ def main():
                 print("[sync]             sudo apt install libreoffice-writer   # or: antiword")
                 print(f"[sync]         - resave the file as .{LEGACY_OFFICE[ext]}")
                 print("[sync]         - enable Tika, which parses legacy Office natively")
+            elif empty_content and ext == ".pdf":
+                print("[sync]     hint: the server extracted no text from this PDF.")
+                if not OCR_FALLBACK:
+                    print("[sync]       - no text layer? enable OCR_FALLBACK in the config "
+                          "(or --ocr-fallback)")
+                elif shutil.which("ocrmypdf") is None:
+                    print("[sync]       - OCR_FALLBACK is on but 'ocrmypdf' is NOT installed:")
+                    print("[sync]           sudo apt install -y ocrmypdf jbig2enc")
+                else:
+                    print("[sync]       - OCR ran and the retry still failed, so the "
+                          "extraction engine itself")
+                    print("[sync]         is likely at fault (e.g. Tika selected but not "
+                          "running): Admin > Settings > Documents.")
             elif empty_content:
-                print("[sync]     hint: the server extracted no text. Common causes:")
+                # OCR is meaningless for non-PDFs — don't suggest it.
+                print(f"[sync]     hint: the server extracted no text from this "
+                      f"'{ext}' file. OCR does not apply to this format. Common causes:")
+                print("[sync]       - the file really has no readable text (a frameset, a")
+                print("[sync]         JS-shell page, a help stub, a template) -> nothing to index")
                 print("[sync]       - extraction engine set to Tika/Docling but that service")
                 print("[sync]         isn't running -> revert to Default (or start Tika), in")
                 print("[sync]         Admin > Settings > Documents.")
-                print("[sync]       - the PDF has no text layer -> re-run with --ocr-fallback")
-                print("[sync]         (auto-OCRs and retries), or OCR manually with ocrmypdf.")
             elif e.response is not None and e.response.status_code in (401, 403):
                 print("[sync]     hint: auth rejected -> check the API key (use the sk- key,")
                 print(f"[sync]       not the JWT token) in {KEY_FILE}.")

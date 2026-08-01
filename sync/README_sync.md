@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.9**
+**Version 2026.08.01.10**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -724,6 +724,26 @@ The original file is what gets hashed and tracked, so nothing re-converts on the
 run; only the uploaded copy is modern (temporary, deleted immediately). Set
 `CONVERT_LEGACY = false` to disable. Enabling Tika instead also works — it parses
 legacy Office natively — but it's a whole extra service for one file format.
+
+**`skipping <name> — only markup, no readable text`.** HTML framesets, JS-shell
+pages and help-system stubs (`Default_CSH.htm`, `*_readme.html`, …) are kilobytes of
+tags around zero words. They're now detected on their *rendered* text, not their
+byte size, and skipped like empty files instead of being uploaded and rejected. A
+real HTML article is unaffected — the threshold is 20 characters of visible text.
+
+**The empty-content hint used to suggest OCR for every format.** OCR is meaningless
+for `.htm`, `.txt` or `.docx`, so the advice is now chosen by file type, and for
+PDFs it reflects your actual configuration:
+
+| situation | what it now says |
+|---|---|
+| non-PDF | "OCR does not apply to this format" + the real causes |
+| PDF, `OCR_FALLBACK` off | enable it in the config |
+| PDF, on, `ocrmypdf` missing | the exact `apt install` line |
+| PDF, on, `ocrmypdf` present | OCR already ran and failed → suspect the extraction engine |
+
+A missing `ocrmypdf` while `OCR_FALLBACK = true` is also flagged once at startup,
+before any file is attempted.
 
 **`skipping <name> — the file contains no text`.** Not an error. A genuinely empty
 text file (0 bytes, or just a newline — stray `readonly.txt`, `.gitkeep`-style
