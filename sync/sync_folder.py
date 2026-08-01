@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.4"
+__version__ = "2026.08.01.5"
 
 import os
 import re
@@ -278,6 +278,8 @@ STATE_FILE = ~/.rag_sync_state.json
 PRUNE            = false               # remove from collection when deleted locally
 FORCE            = false               # re-sync everything even if unchanged
 OCR_FALLBACK     = false               # OCR a PDF locally if the server got no text
+CONVERT_LEGACY   = true                # convert .doc/.ppt/.xls before upload (needs
+                                       # libreoffice, or antiword for .doc)
 DESCRIBE_FIGURES = false               # index vision descriptions of figures/images
 NO_PREFLIGHT     = false               # true = skip the low-text warning
 
@@ -1019,6 +1021,22 @@ def main():
           f"{n_unchanged} unchanged"
           + (f", {n_img_skipped} image(s) ignored (needs --describe-figures)"
              if n_img_skipped else ""))
+
+    # Warn ONCE, up front, rather than failing on each legacy file in turn.
+    n_legacy = sum(1 for w in work if w[0].suffix.lower() in LEGACY_OFFICE)
+    if n_legacy:
+        if not CONVERT_LEGACY:
+            print(f"[sync] ! {n_legacy} legacy Office file(s) (.doc/.ppt/.xls) will be "
+                  "uploaded as-is (CONVERT_LEGACY off) and will almost certainly fail.")
+        elif not converter_available():
+            print(f"[sync] ! {n_legacy} legacy Office file(s) (.doc/.ppt/.xls) need a local "
+                  "converter, and none is installed. The server cannot read these formats,")
+            print("[sync]   so they WILL fail. Install one now and re-run:")
+            print("[sync]     sudo apt install libreoffice-writer     # best: handles doc/ppt/xls")
+            print("[sync]     sudo apt install antiword               # lighter, .doc only")
+        else:
+            print(f"[sync] {n_legacy} legacy Office file(s) will be converted locally "
+                  "before upload.")
     t_start = time.time()
 
     for idx, (p, digest, entry) in enumerate(work, 1):
@@ -1274,6 +1292,8 @@ def main():
     print(f"         standalone images         : {STATS.get('images', 0)}"
           + (f"   ({n_img_skipped} ignored — needs --describe-figures)"
              if n_img_skipped else ""))
+    if STATS.get("converted"):
+        print(f"         legacy .doc/.ppt/.xls converted : {STATS['converted']}")
     if n_empty:
         print(f"         empty files (nothing to index, not an error): {n_empty}")
     if DESCRIBE_FIGURES:

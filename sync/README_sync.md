@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.4**
+**Version 2026.08.01.5**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -492,6 +492,7 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | `--ocr-fallback` | `RAG_OCR_FALLBACK=1` | OCR a PDF locally and retry when the server extracts no text |
 | `--describe-figures` | `RAG_DESCRIBE_FIGURES=1` | describe PDF figures + standalone images with a vision model |
 | `--no-preflight` | `RAG_NO_PREFLIGHT=1` | disable the pre-upload low-text warning |
+| `--no-convert-legacy` | `RAG_CONVERT_LEGACY=0` | don't convert `.doc`/`.ppt`/`.xls` before upload (on by default; needs libreoffice or antiword) |
 | `--status` | — | print how far along this library is, then exit (safe during a run) |
 | — | `RAG_PROGRESS_EVERY` | progress/ETA line every N files (default `25`, `0` = off) |
 | — | `RAG_MIN_TEXT_CHARS` | HTML low-text threshold in chars (default 400) |
@@ -630,6 +631,39 @@ and with **Async Embedding Processing** on and **Embedding Concurrent Requests =
 
 Only very large documents trigger this, which is why a library of ordinary papers
 syncs cleanly and a few books/proceedings volumes fail.
+
+**Every `.doc` / `.ppt` / `.xls` fails with `content provided is empty`.**
+Those are the **pre-2007 binary** Office formats. Open WebUI's Default extractor
+reads the modern zip-based `.docx`/`.pptx`/`.xlsx` but cannot read the old binary
+ones at all — the files are perfectly fine, the parser simply can't open them. Note
+this is unrelated to genuinely empty files, despite the identical error message.
+
+The script now converts them locally before uploading, which needs one tool:
+
+```bash
+sudo apt install libreoffice-writer     # handles .doc, .ppt and .xls
+# or, lighter and .doc-only:
+sudo apt install antiword
+```
+
+With that installed you'll see, per file:
+
+```
+[sync] [61/2548] adding fl54x00.doc …
+[sync]   converted .doc → .docx with soffice (the server cannot read legacy Office files)
+```
+
+and a count in the summary (`legacy .doc/.ppt/.xls converted : 214`). If no converter
+is installed, the run says so **once at the start** rather than failing 200 times:
+
+```
+[sync] ! 214 legacy Office file(s) (.doc/.ppt/.xls) need a local converter, and none is installed.
+```
+
+The original file is what gets hashed and tracked, so nothing re-converts on the next
+run; only the uploaded copy is modern (temporary, deleted immediately). Set
+`CONVERT_LEGACY = false` to disable. Enabling Tika instead also works — it parses
+legacy Office natively — but it's a whole extra service for one file format.
 
 **`skipping <name> — the file contains no text`.** Not an error. A genuinely empty
 text file (0 bytes, or just a newline — stray `readonly.txt`, `.gitkeep`-style
