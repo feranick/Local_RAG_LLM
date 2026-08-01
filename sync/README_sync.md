@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.7**
+**Version 2026.08.01.9**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -250,6 +250,11 @@ A heartbeat left behind by a crashed run doesn't block anything — the PID is c
 not just the file. Syncing two *different* libraries at once is fine (separate state
 files); `--allow-parallel` overrides the check if you're certain.
 
+> **After upgrading mid-run:** a sync started from a pre-2026.08.01.6 copy writes no
+> heartbeat, so `--status` can't see it. Rather than calling it idle, it says the run
+> looks active but publishes no heartbeat, and suggests `pgrep -af sync_folder`.
+> Restart the sync with the current script to get live per-file status.
+
 Long figure runs also report themselves inline every 10 pages:
 
 ```
@@ -264,6 +269,29 @@ kill it, or log it and tail the log:
 python3 sync_folder.py --config papers.conf --describe-figures 2>&1 | tee ~/sync.log
 grep -c '^\[sync\] \[' ~/sync.log     # files attempted so far
 ```
+
+`nohup` works equally well; output is line-buffered on purpose, so the log fills
+continuously rather than in 8 KB bursts:
+
+```bash
+nohup python3 sync_folder.py --config papers.conf > ~/sync.log 2>&1 &
+tail -f ~/sync.log
+```
+
+### Stopping a run
+
+```bash
+kill <pid>            # plain SIGTERM is enough
+```
+
+Both `kill` and Ctrl-C are handled: the state file is written, the run reports
+`interrupted — progress saved`, and re-running the same command resumes. Only
+`kill -9` loses progress back to the last checkpoint (≤10 files or 2 minutes).
+
+Two subtleties that make this work, in case you're wondering why the script bothers:
+SIGTERM's default action would kill Python outright without running exit handlers,
+and a shell sets SIGINT to *ignored* for background jobs — so after `nohup … &`,
+`kill -INT` would otherwise be silently swallowed and the run would carry on.
 
 ## Running a second library
 

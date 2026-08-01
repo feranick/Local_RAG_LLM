@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.8"
+__version__ = "2026.08.01.9"
 
 import os
 import re
@@ -77,6 +77,7 @@ import json
 import time
 import atexit
 import base64
+import signal
 import shutil
 import hashlib
 import pathlib
@@ -88,6 +89,32 @@ try:
     import requests
 except ImportError:
     sys.exit("Missing dependency: pip install requests")
+
+# Keep output line-buffered even when redirected to a file. Python block-buffers
+# (8 KB) when stdout isn't a terminal, so under `nohup … > sync.log` the log would
+# sit empty for a hundred lines at a time and look like a hung run.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except Exception:                      # pragma: no cover  (non-TextIO stream)
+        pass
+
+
+def _stop_cleanly(signum, frame):
+    """Turn a stop signal into the normal interrupt path, so state is saved."""
+    raise KeyboardInterrupt
+
+
+# `kill <pid>` sends SIGTERM, whose default action kills the process outright —
+# no exit handlers, so the state file would lose everything since the last
+# checkpoint. Handle it like Ctrl-C instead.
+signal.signal(signal.SIGTERM, _stop_cleanly)
+
+# A shell sets SIGINT to *ignored* for background jobs, and the child inherits
+# that: after `nohup … &`, `kill -INT` would be silently swallowed and the run
+# would carry on. Restore normal interrupt behaviour when that has happened.
+if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+    signal.signal(signal.SIGINT, _stop_cleanly)
 
 # ============================ configuration ==============================
 # NOTHING needs to be edited in this file. Settings come from a config file so
@@ -1422,4 +1449,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl-C or `kill -INT`: the exit handler has already written the state
+        # file, so say so plainly instead of dumping a traceback.
+        print("\n[sync] interrupted — progress saved; re-run the same command to "
+              "resume where it stopped.")
+        sys.exit(130)
