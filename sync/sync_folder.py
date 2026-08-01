@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.3"
+__version__ = "2026.08.01.4"
 
 import os
 import re
@@ -700,6 +700,29 @@ def preflight_text_warning(path):
     return ""
 
 
+TEXTLIKE_EXTS = {".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".html", ".htm"}
+
+
+def has_nothing_to_index(path, min_chars=5):
+    """True when a file demonstrably holds no text at all.
+
+    Uploading such a file is pointless: the server extracts nothing and answers
+    400 "content provided is empty", which used to be logged as a FAILURE and made
+    the whole run exit non-zero. An empty file isn't a failure — there is simply
+    nothing to index — so it's skipped locally and reported separately.
+    Only applied to plain-text formats, where reading the file IS the extraction;
+    PDFs may legitimately need OCR and are left to the server / --ocr-fallback.
+    """
+    try:
+        if path.stat().st_size == 0:
+            return True
+        if path.suffix.lower() in TEXTLIKE_EXTS:
+            return len(path.read_text(errors="ignore").strip()) < min_chars
+    except OSError:
+        pass
+    return False
+
+
 def build_figures_doc(session, pdf_path):
     """Render each page of a PDF and have the vision model describe any figures.
     Writes the descriptions to a temp .md file. Returns (md_path, n_pages_with_figures)
@@ -997,6 +1020,21 @@ def main():
             continue
 
         # --- document files (pdf / text) ---
+        # An empty text file can't be indexed by anyone; skip it here rather than
+        # letting the server reject it as a "failure" on every single run.
+        if has_nothing_to_index(p):
+            print(f"[sync] {pos} skipping {p.name} — the file contains no text "
+                  f"({p.stat().st_size} bytes)")
+            if is_update:
+                try:
+                    remove_fn(session, entry["remote_id"])
+                except Exception:
+                    pass
+            files[key] = {"hash": digest, "remote_id": None}
+            STATS["empty"] += 1
+            maybe_checkpoint(state)
+            continue
+
         print(f"[sync] {pos} {'updating' if is_update else 'adding'} {p.name} …")
         pf = preflight_text_warning(p)
         if pf:
@@ -1117,11 +1155,13 @@ def main():
     # "Processed" is the honest denominator: every file this run attempted. It is
     # reported alongside the categories that were deliberately NOT attempted
     # (unchanged, images without --describe-figures) so the folder count adds up.
+    n_empty = STATS.get("empty", 0)
     processed = added + updated + dup + len(failed)
     print(f"[sync] done — processed {processed}/{n_work} to-do file(s): "
           f"{added} added, {updated} updated, {dup} already-present, "
           f"{len(failed)} failed, {removed} removed"
-          f"{' (prune ON)' if PRUNE else ''}.")
+          + (f"; {n_empty} skipped as empty" if n_empty else "")
+          + f"{' (prune ON)' if PRUNE else ''}.")
     print(f"[sync] folder holds {len(all_cand)} file(s): {n_work} to process, "
           f"{n_unchanged} unchanged"
           + (f", {n_img_skipped} image(s) ignored" if n_img_skipped else "")
@@ -1140,6 +1180,8 @@ def main():
     print(f"         standalone images         : {STATS.get('images', 0)}"
           + (f"   ({n_img_skipped} ignored — needs --describe-figures)"
              if n_img_skipped else ""))
+    if n_empty:
+        print(f"         empty files (nothing to index, not an error): {n_empty}")
     if DESCRIBE_FIGURES:
         print(f"         figure-description docs   : {STATS.get('figure_docs', 0)}"
               f"  (from {STATS.get('figure_pages', 0)} page(s) containing figures)")

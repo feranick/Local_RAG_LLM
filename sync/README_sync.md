@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.3**
+**Version 2026.08.01.4**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -631,8 +631,17 @@ and with **Async Embedding Processing** on and **Embedding Concurrent Requests =
 Only very large documents trigger this, which is why a library of ordinary papers
 syncs cleanly and a few books/proceedings volumes fail.
 
+**`skipping <name> — the file contains no text`.** Not an error. A genuinely empty
+text file (0 bytes, or just a newline — stray `readonly.txt`, `.gitkeep`-style
+placeholders and the like) can't be indexed by anything, so it's skipped locally
+instead of being uploaded, rejected by the server, and logged as a failure on every
+run. Such files are counted separately (`N skipped as empty`) and don't affect the
+exit code. They're recorded in the state file, so if one later gains content its
+hash changes and it gets indexed normally. PDFs are never skipped this way — an
+image-only PDF has no text *yet*, which is what `--ocr-fallback` is for.
+
 **`400: The content provided is empty` (or a chat says "No sources found").**
-Open WebUI extracted no text from that file. Likely causes: (1) the extraction engine is set to Tika/Docling but that service isn't running — set it back to **Default** or start the service (see the main README's Tika section); (2) the PDF has no text layer — test with `pdftotext file.pdf - | head`, and use `--ocr-fallback` (or OCR manually) if empty; (3) the Default parser choked on a specific PDF — OCR it or use Tika. Filenames with spaces/quotes can also break the upload — prefer `Underscore_Names.pdf`.
+Open WebUI extracted no text from a file that *does* have content locally. Likely causes: (1) the extraction engine is set to Tika/Docling but that service isn't running — set it back to **Default** or start the service (see the main README's Tika section); (2) the PDF has no text layer — test with `pdftotext file.pdf - | head`, and use `--ocr-fallback` (or OCR manually) if empty; (3) the Default parser choked on a specific PDF — OCR it or use Tika. Filenames with spaces/quotes can also break the upload — prefer `Underscore_Names.pdf`.
 
 **Can't find API Keys in Open WebUI.**
 The section doesn't appear in **Settings → Account** until enabled: **Admin Panel → Settings → Authentication → Enable API Key**. Then create the `sk-...` key under Account. Not needed if you only upload via the GUI.
