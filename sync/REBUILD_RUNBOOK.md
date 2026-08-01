@@ -1,6 +1,6 @@
 # Full library rebuild — runbook
 
-**Version 2026.07.31.1**
+**Version 2026.08.01.1**
 
 Every command, in order, with a verification checkpoint after each stage. Don't
 move to the next stage until its check passes — that's the whole point of the
@@ -18,8 +18,31 @@ CSV=$SW/access_all_papers.csv       # your metadata CSV
 KEY=$(cat ~/.rag_sync_key)
 SYNC=$SW/sync_folder_nicola.py         # your copy of sync_folder.py
 CONF=$SW/sync_folder.conf              # its configuration file (see README_sync.md)
-COLL=c411c9dc-289a-4e4c-bfa9-c5fab84d22c6      # Open WebUI knowledge collection id
+BASE=http://localhost:3000             # the instance this library lives in
 ```
+
+The API needs the collection's **id** (a UUID), never its display name — a name
+gives `{"detail":"We could not find what you're looking for :/"}`. It's the same
+value as `TARGET` in your config file, so read it from there rather than retyping it:
+
+```bash
+TARGET=$(sed -n 's/^ *TARGET *= *//p' $CONF | sed 's/[#;].*//' | tr -d '"'"'" | xargs)
+echo "$TARGET"        # e.g. c411c9dc-289a-4e4c-bfa9-c5fab84d22c6
+```
+
+If that comes back empty, list what the instance has and copy the id:
+
+```bash
+curl -s "$BASE/api/v1/knowledge/list" -H "Authorization: Bearer $KEY" \
+| python3 -c 'import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get("data",[])
+[print(k.get("id"),"|",k.get("name")) for k in d]'
+```
+
+> **Naming, so the commands below are unambiguous:** `TARGET` is always the **id**
+> used by the API and by `sync_folder.conf`. A collection's human-readable *name*
+> (what you click in the UI, e.g. `breakerspace`) is never accepted by these
+> endpoints.
 
 ---
 
@@ -170,17 +193,34 @@ the script, so upgrading `sync_folder.py` never means re-editing it:
 cat $CONF     # TARGET, WATCH_DIR, KEY_FILE, STATE_FILE — all correct?
 ```
 
+Empty the collection, then clear the state so the sync treats every file as new.
+`$TARGET` here is the **id** from the top of this runbook, not the collection's name:
+
 ```bash
-curl -sS -X POST "http://localhost:3000/api/v1/knowledge/$COLL/reset" \
+curl -sS -X POST "$BASE/api/v1/knowledge/$TARGET/reset" \
   -H "Authorization: Bearer $KEY"; echo
-curl -sS -X DELETE "http://localhost:3000/api/v1/files/all" \
+curl -sS -X DELETE "$BASE/api/v1/files/all" \
   -H "Authorization: Bearer $KEY"; echo
-rm -f ~/.rag_sync_state.json        # the STATE_FILE named in $CONF
+rm -f ~/.rag_sync_state.json        # use the STATE_FILE named in $CONF
 
 python3 $SYNC --config $CONF --describe-figures --ocr-fallback
 ```
 
-Run it in `tmux`/`screen` — with figure descriptions this takes hours.
+`reset` returns the collection's JSON on success. A `404 We could not find what
+you're looking for :/` means `$TARGET` holds a name instead of the id, or the key
+belongs to a different instance than `$BASE`.
+
+`DELETE /files/all` removes **every** uploaded file in that instance, across all
+collections — correct for a single-library rebuild, wrong if the instance hosts
+another library. Skip it in that case; `reset` alone is enough, at the cost of
+leaving orphaned file objects that the duplicate check still compares against.
+
+Run it in `tmux`/`screen` — with figure descriptions this takes hours. Progress is
+numbered with an ETA, and from another terminal:
+
+```bash
+python3 $SYNC --config $CONF --status
+```
 
 ✅ *Check:* the closing `[sync] done —` line shows nearly everything **added**,
 `already-present` near zero, and the per-type breakdown matches Stage 5.

@@ -1,6 +1,6 @@
 # New library runbook — a second RAG instance
 
-**Version 2026.07.28.1**
+**Version 2026.08.01.1**
 
 Every command in order, with a checkpoint after each stage. Use this when you want
 an **independent library** — its own documents, its own collection, and (the usual
@@ -22,11 +22,16 @@ Set these once for the session:
 ```bash
 SW=~/Software/Local_RAG_LLM/script     # where the scripts live
 NAME=reports                           # library name (lower-case; used for files)
-COLL=Reports                           # collection name shown in the UI
+COLL_NAME=Reports                      # collection NAME shown in the UI
 PORT=3002                              # host port for the new instance
 EMBED=bge-m3                           # embedding model for THIS library
 DOCS=~/reports                         # folder holding this library's documents
 ```
+
+> **Name vs id.** `COLL_NAME` is the label you see in the UI. Every API call and the
+> `TARGET` entry in the config file need the collection's **id** (a UUID), which
+> Stage 1 creates and writes into `<NAME>.conf` for you. Passing a name to an API
+> endpoint returns `{"detail":"We could not find what you're looking for :/"}`.
 
 ---
 
@@ -54,7 +59,7 @@ collection, and a matching config file.
 ```bash
 mkdir -p $DOCS
 python3 new_rag_instance.py \
-  --collection $COLL --embed-model $EMBED --port $PORT \
+  --collection $COLL_NAME --embed-model $EMBED --port $PORT \
   --name open-webui-$NAME --watch-dir $DOCS \
   --email you@example.com
 ```
@@ -75,9 +80,28 @@ curl -m 5 http://localhost:$PORT/health && echo " instance OK"
 cat $NAME.conf                      # TARGET / BASE_URL / KEY_FILE / STATE_FILE filled in
 ```
 
-If the collection id or API key came back empty, the script prints exactly what to
-do by hand for that step (Open WebUI's API paths differ between versions); finish
-those two in the UI and paste the id into `$NAME.conf`.
+If the collection id came back empty, create it in the UI and paste the id into
+`$NAME.conf`.
+
+**If the API key step warns** (Open WebUI ≥0.11 often ships the personal-API-key
+feature disabled, so *Settings → Account* shows no "API Keys" section at all), the
+script tries to enable it via the admin config, and failing that writes the **login
+token** to the key file so you can sync immediately. That token expires, so swap in
+a real key when convenient — either:
+
+```bash
+# UI route
+#   Admin → Settings → Authentication → Enable API Key (Save)
+#   Settings → Account → API Keys → create  (starts with sk-)
+echo 'sk-...' > ~/.rag_sync_key_open-webui-$NAME
+
+# or mint it from the shell
+BASE=http://localhost:$PORT
+TOK=$(curl -s -X POST $BASE/api/v1/auths/signin -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"YOURPASS"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))')
+curl -s -X POST $BASE/api/v1/auths/api_key -H "Authorization: Bearer $TOK"; echo
+```
 
 ---
 
