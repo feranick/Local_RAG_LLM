@@ -193,6 +193,12 @@ FORCE = cfg_flag("FORCE", "--force", "--no-force")
 # ocr fallback = OCR a PDF locally (ocrmypdf) and retry when the server got no text
 OCR_FALLBACK = cfg_flag("OCR_FALLBACK", "--ocr-fallback", "--no-ocr-fallback")
 
+# Convert pre-2007 .doc/.ppt/.xls to .docx/.pptx/.xlsx before uploading. ON by
+# default: the server cannot read those formats at all, so without this every one
+# of them fails. Cheap and local (LibreOffice, or antiword/catdoc for .doc).
+CONVERT_LEGACY = cfg_flag("CONVERT_LEGACY", "--convert-legacy",
+                          "--no-convert-legacy", default=True)
+
 # describe figures = render pages/images and index a vision-model description
 DESCRIBE_FIGURES = cfg_flag("DESCRIBE_FIGURES", "--describe-figures", "--no-describe-figures")
 FIGURE_MODEL = cfg("FIGURE_MODEL", "llava")     # loads on the Spark's Ollama build
@@ -702,6 +708,67 @@ def preflight_text_warning(path):
 
 TEXTLIKE_EXTS = {".txt", ".md", ".rst", ".csv", ".tsv", ".json", ".html", ".htm"}
 
+# Pre-2007 binary Office formats. Open WebUI's Default extractor reads the modern
+# zip-based .docx/.pptx/.xlsx but NOT these, so they always come back as
+# "400: The content provided is empty" even though the file is full of text.
+# Converting locally to the modern equivalent fixes them.
+LEGACY_OFFICE = {".doc": "docx", ".ppt": "pptx", ".xls": "xlsx"}
+
+
+def _which(*names):
+    for n in names:
+        found = shutil.which(n)
+        if found:
+            return found
+    return None
+
+
+def converter_available():
+    return bool(_which("soffice", "libreoffice") or _which("antiword", "catdoc"))
+
+
+def make_converted_copy(src: pathlib.Path):
+    """Convert a legacy .doc/.ppt/.xls into a readable copy in a temp dir.
+
+    Prefers LibreOffice (keeps structure, handles all three formats); falls back to
+    antiword/catdoc for .doc, which yield plain text. Returns (path, tool_name) or
+    (None, ""). The caller removes path.parent.
+    """
+    target = LEGACY_OFFICE.get(src.suffix.lower())
+    if not target:
+        return None, ""
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="rag_conv_"))
+    soffice = _which("soffice", "libreoffice")
+    if soffice:
+        try:
+            subprocess.run(
+                [soffice, "--headless",
+                 # own profile dir: avoids clashing with a desktop LibreOffice
+                 f"-env:UserInstallation=file://{tmp}/profile",
+                 "--convert-to", target, "--outdir", str(tmp), str(src)],
+                check=True, timeout=300,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            out = tmp / f"{src.stem}.{target}"
+            if out.is_file() and out.stat().st_size > 0:
+                return out, pathlib.Path(soffice).name
+        except Exception:
+            pass
+    if src.suffix.lower() == ".doc":
+        tool = _which("antiword", "catdoc")
+        if tool:
+            try:
+                r = subprocess.run([tool, str(src)], check=True, timeout=180,
+                                   capture_output=True)
+                txt = r.stdout.decode("utf-8", "ignore")
+                if txt.strip():
+                    out = tmp / f"{src.stem}.txt"
+                    out.write_text(txt)
+                    return out, pathlib.Path(tool).name
+            except Exception:
+                pass
+    shutil.rmtree(tmp, ignore_errors=True)
+    return None, ""
+
 
 def has_nothing_to_index(path, min_chars=5):
     """True when a file demonstrably holds no text at all.
@@ -1039,19 +1106,35 @@ def main():
         pf = preflight_text_warning(p)
         if pf:
             print(f"[sync]   ! {pf}")
+
+        # Legacy binary Office files are converted BEFORE upload: the server can
+        # never read them, so uploading first just wastes a round trip and logs a
+        # spurious failure. The original file is what gets hashed/tracked.
+        upload_path, conv_dir = p, None
+        if CONVERT_LEGACY and ext in LEGACY_OFFICE:
+            conv, tool = make_converted_copy(p)
+            if conv:
+                upload_path, conv_dir = conv, conv.parent
+                print(f"[sync]   converted {ext} → {conv.suffix} with {tool} "
+                      "(the server cannot read legacy Office files)")
+            else:
+                print(f"[sync]   ! cannot convert {ext} — install libreoffice "
+                      "(or antiword), or enable Tika; uploading as-is will likely fail")
         try:
             if is_update:
                 # changed file: remove the old copy (and its figure doc) first
                 remove_fn(session, entry["remote_id"])
                 if entry.get("figures_id"):
                     remove_fn(session, entry["figures_id"])
-            remote_id = add_fn(session, p)
+            remote_id = add_fn(session, upload_path)
             files[key] = {"hash": digest, "remote_id": remote_id}
             updated += is_update
             added += not is_update
             STATS["pdfs" if ext == ".pdf" else "text_records"] += 1
             if ext == ".md":
                 STATS["md_records"] += 1
+            if conv_dir:
+                STATS["converted"] += 1
             attach_figures(session, p, key, files, add_fn)
             maybe_checkpoint(state)
         except (requests.Timeout, requests.ConnectionError) as e:
@@ -1114,6 +1197,14 @@ def main():
                 print("[sync]     hint: this file DOES contain extractable text, so the "
                       "server-side extraction is at fault — usually a large document "
                       "timing out. Retry it alone, or check the extraction engine.")
+            elif empty_content and ext in LEGACY_OFFICE:
+                print(f"[sync]     hint: '{ext}' is the pre-2007 binary Office format, which")
+                print("[sync]       the Default extractor cannot read at all (the file is fine).")
+                print("[sync]       Fix it in one of three ways:")
+                print("[sync]         - install a converter, then re-run this script:")
+                print("[sync]             sudo apt install libreoffice-writer   # or: antiword")
+                print(f"[sync]         - resave the file as .{LEGACY_OFFICE[ext]}")
+                print("[sync]         - enable Tika, which parses legacy Office natively")
             elif empty_content:
                 print("[sync]     hint: the server extracted no text. Common causes:")
                 print("[sync]       - extraction engine set to Tika/Docling but that service")
@@ -1125,6 +1216,9 @@ def main():
                 print("[sync]     hint: auth rejected -> check the API key (use the sk- key,")
                 print(f"[sync]       not the JWT token) in {KEY_FILE}.")
             failed.append(p.name)
+        finally:
+            if conv_dir:
+                shutil.rmtree(conv_dir, ignore_errors=True)
 
     # --- prune files deleted from the folder ---
     if PRUNE:
