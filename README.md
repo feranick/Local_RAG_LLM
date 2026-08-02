@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.07.31.3**
+**Version 2026.08.02.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -25,6 +25,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `update_local_rag.sh` | Updates the stack when newer images exist — refreshes the containers (Open WebUI, AnythingLLM, and Tika/vision if present) while preserving data. `--check` reports without changing. |
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
+| `migrate_rag.py` | Move the whole stack to another machine: archives the docker volumes (collections **and** vectors), documents and sync files, then restores them and rewrites the absolute paths so nothing gets re-indexed or duplicated. See `MIGRATION_RUNBOOK.md`. |
 | `manage_models.py` | Browse, add, test, list, remove or set the default **LLM** on a running stack. `--browse`/`--tags` read the available models live from the Ollama library; every add is followed by a real load test, since a model can download and still fail to run on this Ollama build. |
 | `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
 | `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in [`sync/README.md`](sync/README.md).** |

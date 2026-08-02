@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.01.10**
+**Version 2026.08.02.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -148,6 +148,12 @@ STATE_FILE = ~/.rag_sync_papers_state.json
 Deleting the state file is harmless — it just makes the next run treat every file
 as new (see [Re-syncing / resetting](#re-syncing--resetting)). `new_rag_instance.py`
 creates both files for a new instance automatically, named after it.
+
+> **Moving to another machine?** The state file is keyed on **absolute paths**, so
+> if the documents land elsewhere every entry misses and the next sync re-uploads
+> the entire library on top of the restored collection. `migrate_rag.py` handles
+> the whole move — volumes, documents, side files — and rewrites those paths for
+> you; see `MIGRATION_RUNBOOK.md`.
 
 **Finding the API key:**
 
