@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.08.02.1**
+**Version 2026.08.02.2**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -212,6 +212,29 @@ The collection must already exist **and contain documents** (check **Workspace �
 3. Ask your question. Answers come back grounded in the papers, with sources.
 
 To make retrieval always-on without typing `#` each time, go to **Workspace → Models → + New Model**, set the base model to `gemma4:26b`, attach your Knowledge collection, optionally add a system prompt ("Answer using the attached papers and cite sources."), and save. That preset then appears in the model dropdown and retrieves automatically.
+
+### Two ways answers get grounded — and why one is model-dependent
+
+Open WebUI can reach your documents by two quite different routes, and knowing which one is in play explains most "the answer is in there but the model says it isn't" moments:
+
+| | How it works | Depends on the chat model? |
+|---|---|---|
+| **Direct injection** — `#` + collection, or a model preset with the collection attached | the server retrieves the top-k chunks and puts them in the prompt | **No.** Every model sees the same text |
+| **Agentic knowledge tools** — the model calls `search_knowledge_files`, `query_knowledge_files`, … itself | the model decides what to search for, reads the results, and decides whether to search again | **Yes, heavily** |
+
+Agentic retrieval is more flexible, but it only works as well as the model's tool use. A real example from this stack — same collection, same embeddings, same question ("recommended sample height below the holder surface for EDS"):
+
+- **qwen3.6:35b** → `search_knowledge_files` → `query_knowledge_files` → 3 sources → quoted the manual correctly (4–7 mm, 5 mm as the trade-off).
+- **gemma4:26b** → queried the knowledge base *inventory*, got one irrelevant chunk from an unrelated CSV, and concluded the information wasn't available — while listing, by name, the very manual that contains it.
+
+The passage was plainly present in the indexed text, and adding `#` + the collection made gemma4 answer correctly straight away. So a failure like this is **not** evidence of a bad index, a bad chunk size or a bad embedding model — all of that is shared between the two runs.
+
+Practical guidance:
+
+- Use a **model preset with the collection attached** for anything you rely on. It removes the model's tool use from the equation, and it's the reason a smaller model can still give good grounded answers.
+- Reserve agentic retrieval for the stronger models (a dense 31–35B does noticeably better than a 26B MoE with ~4B active parameters per token).
+- A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in `sync/README.md`).
+- Before blaming retrieval, re-ask the same question with `#` + the collection. If that works, the index is fine and the difference was tool use.
 
 ---
 

@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.02.1**
+**Version 2026.08.02.2**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -768,3 +768,17 @@ The section doesn't appear in **Settings → Account** until enabled: **Admin Pa
 
 **Typing `#` shows no popup / `#Papers` isn't grounding answers.**
 The `#` menu lists Knowledge collections that **contain documents**. If empty, the collection is empty or doesn't exist — create it and sync into it (`TARGET` = its id). Once it has documents, `#` lists it; be sure to *click* the collection in the popup, not just type the text.
+
+**"The answer is definitely in the library, but the model says it isn't."**
+Check *how* the question was asked before suspecting the index. Without `#` (or a
+model preset with the collection attached), Open WebUI lets the model search the
+knowledge base **itself** via tool calls — and weaker models do this badly: they
+query the file inventory instead of the content, take one irrelevant hit, and
+conclude the information is absent, sometimes while naming the very document that
+contains it.
+
+Re-ask with `#` + the collection clicked. If the answer appears, retrieval was
+never the problem — the index, chunk size and embedding model are shared by both
+attempts. Observed here with the same collection and question: `qwen3.6:35b`
+answered correctly from tool calls, `gemma4:26b` did not, and `#` fixed it
+instantly. See *Two ways answers get grounded* in the [main README](../README.md).
