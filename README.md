@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.08.02.2**
+**Version 2026.08.02.5**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -211,7 +211,14 @@ The collection must already exist **and contain documents** (check **Workspace �
 2. Type `#` in the message box and **click your collection** from the popup that appears (don't just type the text `#Papers` — that's literal text and attaches nothing). You'll see the collection appear as a chip above the input.
 3. Ask your question. Answers come back grounded in the papers, with sources.
 
-To make retrieval always-on without typing `#` each time, go to **Workspace → Models → + New Model**, set the base model to `gemma4:26b`, attach your Knowledge collection, optionally add a system prompt ("Answer using the attached papers and cite sources."), and save. That preset then appears in the model dropdown and retrieves automatically.
+To make retrieval always-on without typing `#` each time, go to **Workspace → Models → + New Model**, set the base model to `gemma4:26b`, attach your Knowledge collection, optionally add a system prompt ("Answer using the attached papers and cite sources."), and save. That preset then appears in the model dropdown.
+
+> **Attaching a collection is not enough on its own.** Since v0.10 native function
+> calling is the default, and an attached knowledge base is **not auto-injected** —
+> the model is expected to fetch it with tool calls. Set **Advanced Params →
+> Function Calling → `Legacy`** on the preset to restore automatic injection.
+> (`Default` in that column means *unset → inherit the global*, which is Native.)
+> See below.
 
 ### Two ways answers get grounded — and why one is model-dependent
 
@@ -219,8 +226,8 @@ Open WebUI can reach your documents by two quite different routes, and knowing w
 
 | | How it works | Depends on the chat model? |
 |---|---|---|
-| **Direct injection** — `#` + collection, or a model preset with the collection attached | the server retrieves the top-k chunks and puts them in the prompt | **No.** Every model sees the same text |
-| **Agentic knowledge tools** — the model calls `search_knowledge_files`, `query_knowledge_files`, … itself | the model decides what to search for, reads the results, and decides whether to search again | **Yes, heavily** |
+| **Direct injection** — `#` + collection, or a preset with **Function Calling = `Legacy`** | the server retrieves the top-k chunks and puts them in the prompt | **No.** Every model sees the same text |
+| **Agentic knowledge tools** — Native mode, the default since v0.10 — the model calls `search_knowledge_files`, `query_knowledge_files`, `grep_knowledge_files`, … itself | the model decides what to search for, reads the results, and decides whether to search again | **Yes, heavily** |
 
 Agentic retrieval is more flexible, but it only works as well as the model's tool use. A real example from this stack — same collection, same embeddings, same question ("recommended sample height below the holder surface for EDS"):
 
@@ -229,12 +236,70 @@ Agentic retrieval is more flexible, but it only works as well as the model's too
 
 The passage was plainly present in the indexed text, and adding `#` + the collection made gemma4 answer correctly straight away. So a failure like this is **not** evidence of a bad index, a bad chunk size or a bad embedding model — all of that is shared between the two runs.
 
+### Making a smaller model reliable: switch it to Legacy tool calling
+
+Attaching the collection to a preset does **not** by itself take the model's tool use
+out of the loop — that was the whole point of the move to native function calling.
+To get server-side injection back, set **Function Calling** to **`Legacy`** at
+whichever scope suits you:
+
+| Scope | Where |
+|-------|-------|
+| One model | **Workspace → Models → <preset> → Advanced Params → Show → Function Calling → `Legacy`** |
+| One chat | **Chat Controls → Advanced Params → Function Calling → `Legacy`** |
+| Every model | **Settings → Admin → AI → Models → Model Defaults** (top of the list) → `Legacy` |
+| Env var | `DEFAULT_MODEL_PARAMS: '{"function_calling": "legacy"}'` (no standalone variable exists) |
+
+Two naming traps here, both easy to trip over:
+
+- The mode **formerly called "Default" is now "Legacy"** (renamed in v0.10, when Native
+  became the default).
+- In the Advanced Params table, a greyed **`Default`** means *this parameter is unset —
+  inherit the global*, which resolves to **Native**. Seeing `Default` next to Function
+  Calling does **not** mean legacy behaviour is active. You must explicitly pick
+  `Legacy`.
+
+Verified here: `gemma4:26b` answers correctly with `#`, and fails with a preset that
+has the collection attached but Function Calling left unset.
+
+> Upstream considers Legacy unsupported and kept only for backward compatibility —
+> their recommended fix is a stronger tool-calling model rather than falling back.
+> For this stack that means: use Legacy to make a small model dependable today, and
+> prefer a stronger model (e.g. `qwen3.6:35b`) where you want agentic retrieval.
+
+Two alternatives, both narrower:
+
+- **Full Context** — click the attached collection chip to toggle it. Injects whole
+  documents with no chunking or search. Excellent for a few short reference docs,
+  unusable for a library of thousands.
+- **System prompt** instructing the model to call `query_knowledge_files` first. Helps
+  a bit, but you're still relying on the tool use that failed.
+
+### Which models cope with agentic retrieval
+
+Measured on this stack, same collection, same question ("recommended sample height
+below the holder surface for EDS", answer present in the Phenom XL manual):
+
+| Model | Native / agentic | Notes |
+|-------|------------------|-------|
+| `qwen3.6:35b` | ✅ correct | chained `search_knowledge_files` → `query_knowledge_files`, cited 3 sources |
+| `gemma4:31b` | ✅ correct | dense; no workaround needed |
+| `gemma4:26b` | ❌ gave up | MoE, ~4B active parameters/token; searched the file inventory, took one irrelevant hit, declared the information missing |
+
+The pattern is **active parameters per token, not total size**: the 26B MoE is the
+odd one out, while the smaller-on-paper dense 31B is fine. If a model fails this way,
+either move up to one that doesn't, or set `Function Calling = Legacy` for it.
+
 Practical guidance:
 
-- Use a **model preset with the collection attached** for anything you rely on. It removes the model's tool use from the equation, and it's the reason a smaller model can still give good grounded answers.
-- Reserve agentic retrieval for the stronger models (a dense 31–35B does noticeably better than a 26B MoE with ~4B active parameters per token).
+- Use **`Function Calling = Legacy`** for anything you rely on with a model that
+  fails the test above — and prefer switching model where you can, since Legacy is
+  unsupported upstream.
+- Test a new chat model with one question you know the answer to *before* trusting it
+  for real work. The failure mode is a confident "not in the documents", not an error.
 - A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in `sync/README.md`).
 - Before blaming retrieval, re-ask the same question with `#` + the collection. If that works, the index is fine and the difference was tool use.
+- The agentic tool set is worth knowing even so: `query_knowledge_files` is semantic, `grep_knowledge_files` does exact string/regex matching, and `view_file` reads a line range. Capable models chain them; a system prompt naming which to prefer per collection helps.
 
 ---
 

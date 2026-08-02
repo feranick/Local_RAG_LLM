@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.02.2**
+**Version 2026.08.02.5**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -781,4 +781,14 @@ Re-ask with `#` + the collection clicked. If the answer appears, retrieval was
 never the problem — the index, chunk size and embedding model are shared by both
 attempts. Observed here with the same collection and question: `qwen3.6:35b`
 answered correctly from tool calls, `gemma4:26b` did not, and `#` fixed it
-instantly. See *Two ways answers get grounded* in the [main README](../README.md).
+instantly. `gemma4:31b` (dense) handles the same question correctly with no
+workaround, so the deciding factor is **active parameters per token**, not total
+model size — the 26B MoE runs ~4B active and is the one that struggles.
+
+The durable fix is **not** simply attaching the collection to a model preset:
+with native function calling (the default since v0.10) an attached knowledge base
+is *not* auto-injected either, so the preset fails the same way. Set
+**Workspace → Models → <preset> → Advanced Params → Function Calling → `Legacy`**
+to restore server-side injection — note that a greyed **`Default`** in that table
+means *unset → inherit the global*, i.e. Native, not legacy behaviour. See
+*Two ways answers get grounded* in the [main README](../README.md).
