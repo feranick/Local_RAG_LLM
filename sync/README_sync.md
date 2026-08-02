@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.02.5**
+**Version 2026.08.02.8**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -768,6 +768,21 @@ The section doesn't appear in **Settings → Account** until enabled: **Admin Pa
 
 **Typing `#` shows no popup / `#Papers` isn't grounding answers.**
 The `#` menu lists Knowledge collections that **contain documents**. If empty, the collection is empty or doesn't exist — create it and sync into it (`TARGET` = its id). Once it has documents, `#` lists it; be sure to *click* the collection in the popup, not just type the text.
+
+**One specific document never comes back, though everything else works.**
+Typically a *short* file — a note, an SOP, a one-page addendum — losing the ranking
+contest. Check **Admin → Settings → Documents → Top K** first: the default is `3`, so
+only three chunks are retrieved per question and a single-chunk note must out-rank
+two hits from your longest documents. Raise it to **10–15** and enable **Hybrid
+Search**, whose BM25 half is what makes short documents with distinctive terms
+competitive. No re-indexing needed — both apply at query time.
+
+Two things that make such a file easier to find, whichever mode you're in: a
+descriptive **filename** (agentic search often matches filenames before content) and
+a first-line heading carrying the key terms. And if the file is guidance that should
+*override* the general documentation, don't leave it to retrieval at all — put it in
+its own small knowledge base attached in **Full Context** mode, which is injected
+verbatim every message.
 
 **"The answer is definitely in the library, but the model says it isn't."**
 Check *how* the question was asked before suspecting the index. Without `#` (or a
