@@ -1,6 +1,6 @@
 # Local RAG on NVIDIA DGX Spark
 
-**Version 2026.08.02.5**
+**Version 2026.08.02.7**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -297,6 +297,49 @@ Practical guidance:
   unsupported upstream.
 - Test a new chat model with one question you know the answer to *before* trusting it
   for real work. The failure mode is a confident "not in the documents", not an error.
+
+### Follow-up suggestions, titles and tags: the task model
+
+The clickable follow-up questions under each answer are **not** produced by the chat
+model as part of its reply. Open WebUI generates them with a separate **task model**,
+which also writes chat titles, tags and retrieval queries. Auto-generation is on by
+default (**Settings → Interface → Chat → Follow-Up Auto-Generation**).
+
+If follow-ups appear with one chat model and not another, that's the task model
+defaulting to *whatever you're chatting with*: the model is asked for a structured
+payload as a side job, and if its output doesn't parse you simply get no chips — no
+error. Observed here: `qwen3.6:35b` produces them, `gemma4:31b` does not.
+
+Pin a small model for the job instead:
+
+**Admin Panel → Settings → Interface → Task Model (Local)** → e.g. `gemma3:1b`,
+`llama3.2:3b` (there's a separate *Task Model (External)* field for cloud models;
+locally hosted chat models use the Local one).
+
+Upstream recommends a genuinely tiny, *non-reasoning* model here — titles, tags and
+follow-ups are trivial jobs. Two benefits beyond consistent follow-ups: background
+work stops occupying your big model, and on the Spark that avoids evicting ~20 GB of
+weights to write a three-word chat title.
+
+If the menu labels differ in your build, the env vars are stable:
+`TASK_MODEL` (local), `TASK_MODEL_EXTERNAL`.
+
+Each chore can also be switched off individually on the same page:
+
+| Chore | Toggle | Env var |
+|---|---|---|
+| Follow-up suggestions | Follow-up Generation | `ENABLE_FOLLOW_UP_GENERATION=False` |
+| Chat titles | Title Generation | `ENABLE_TITLE_GENERATION=False` |
+| Tags | Tags Generation | `ENABLE_TAGS_GENERATION=False` |
+| Prompt autocomplete | Autocomplete Generation | `ENABLE_AUTOCOMPLETE_GENERATION=False` |
+
+Autocomplete is the one to disable first if the UI feels sluggish during a sync — it
+fires on every keystroke, and every keystroke then queues behind whatever the GPU is
+already doing.
+
+Worth turning on while exploring a library: **Keep Follow-Up Prompts in Chat**
+(Settings → Interface), which preserves the suggestions on older messages instead of
+only the latest one.
 - A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in `sync/README.md`).
 - Before blaming retrieval, re-ask the same question with `#` + the collection. If that works, the index is fine and the difference was tool use.
 - The agentic tool set is worth knowing even so: `query_knowledge_files` is semantic, `grep_knowledge_files` does exact string/regex matching, and `view_file` reads a line range. Capable models chain them; a system prompt naming which to prefer per collection helps.
