@@ -1,6 +1,6 @@
 # Moving the stack to another machine — runbook
 
-**Version 2026.08.02.1**
+**Version 2026.08.03.2**
 
 Every command in order, with a checkpoint after each stage. The goal is a new
 machine where the libraries are **already indexed** — no re-embedding, no

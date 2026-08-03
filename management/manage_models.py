@@ -11,9 +11,13 @@ Important distinction:
     the whole collection and forces a full re-sync — so this script refuses to
     treat that as a casual change (see --embedding-warning).
 
-Every add is followed by a REAL load test: on this hardware a model can download
-perfectly and still fail to run (e.g. llama3.2-vision needs the 'mllama'
-architecture, which the DGX Spark's Ollama build does not support).
+Every add is followed by a REAL load test: a model can download perfectly and
+still fail to run on a given build (e.g. llama3.2-vision needs the 'mllama'
+architecture, which several Ollama builds — including the DGX Spark's — lack).
+
+What fits is decided by the detected hardware, not a hardcoded number: the memory
+budget comes from platform_probe.py (RAG_USABLE_MEM_GB > hardware.conf > live
+probe), so --tags and --suggest hide models this machine cannot hold.
 
 Finding a name to install is the awkward part, so discovery is LIVE — it reads the
 public Ollama library rather than a baked-in list that would go stale:
@@ -30,11 +34,11 @@ Usage:
   python3 manage_models.py --add llama3.3:70b         # pull + verify it loads
   python3 manage_models.py --test qwen3.6:27b         # verify only
   python3 manage_models.py --remove gemma4:12b        # free the disk space
-  python3 manage_models.py --suggest                  # small offline starting list
+  python3 manage_models.py --suggest                  # offline starting list that fits
   python3 manage_models.py --set-default llama3.3:70b --instance http://localhost:3000
 """
 
-__version__ = "2026.08.03.1"
+__version__ = "2026.08.03.2"
 
 import os
 import re
@@ -76,7 +80,35 @@ CATALOG = "https://ollama.com"
 #   *-cloud  run on Ollama's servers, not locally
 UNUSABLE_TAG_MARKERS = ("-mlx", "mlx-", ":cloud", "-cloud")
 
-USABLE_MEM_GB = 110.0     # ~of the Spark's 128 GB unified memory, after overhead
+
+# How much model this machine can hold. Measured, not assumed: a DGX Spark has
+# ~110 GB of unified memory, a 24 GB workstation card has 23. Resolution order is
+# RAG_USABLE_MEM_GB > hardware.conf > a live probe > a conservative default, so a
+# copy of this script on a machine with none of that still runs.
+def _usable_mem_gb():
+    try:
+        import platform_probe                       # same directory / installed
+        return platform_probe.usable_mem_gb()
+    except ImportError:
+        pass
+    try:                                            # repo checkout: ../common
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "common"))
+        import platform_probe
+        return platform_probe.usable_mem_gb()
+    except Exception:
+        pass
+    env = os.environ.get("RAG_USABLE_MEM_GB")
+    if env:
+        try:
+            return float(env)
+        except ValueError:
+            pass
+    warn("hardware not probed (platform_probe.py not found) — assuming 16 GB usable; "
+         "set RAG_USABLE_MEM_GB to correct it")
+    return 16.0
+
+
+USABLE_MEM_GB = _usable_mem_gb()
 
 
 def http_get(url, timeout=25):
@@ -256,24 +288,34 @@ def cmd_tags(name, show_all):
 
 
 # Small fallback list for when the machine is offline. NOT authoritative — use
-# --browse / --tags for the current catalogue.
+# --browse / --tags for the current catalogue. Sizes are approximate download
+# sizes in GB, used only to hide models this machine cannot hold.
 SUGGESTED = [
-    ("gemma4:26b",   "chat",  "MoE, ~4B active/token — fast, good default"),
-    ("gemma4:31b",   "chat",  "largest dense Gemma 4"),
-    ("gemma4:12b",   "chat",  "lighter, quicker"),
-    ("llama3.3:70b", "chat",  "strong all-rounder, slower (~40GB)"),
-    ("qwen3.6:27b",  "chat",  "dense, high quality (Alibaba model)"),
-    ("qwen3.6:35b",  "chat",  "35B-A3B MoE, faster (Alibaba model)"),
-    ("deepseek-r1:70b", "chat", "reasoning specialist"),
-    ("nomic-embed-text", "embedding", "default embedder, 768-dim"),
-    ("bge-m3",       "embedding", "multilingual / long context"),
-    ("mxbai-embed-large", "embedding", "alternative embedder"),
-    ("llava",        "vision", "figure descriptions — loads on the Spark"),
-    ("moondream",    "vision", "small vision model"),
+    ("gemma4:e2b-it-qat", "chat", 4.3, "smallest useful chat model (QAT)"),
+    ("gemma4:12b-it-qat", "chat", 7.2, "12B, quantisation-aware — modest GPUs"),
+    ("gemma4:12b",   "chat",  7.6,  "small and quick"),
+    ("gemma4:26b",   "chat",  18.0, "MoE, ~4B active/token — fast"),
+    ("gemma4:31b",   "chat",  20.0, "largest dense Gemma 4"),
+    ("qwen3.6:27b",  "chat",  17.0, "dense, high quality (Alibaba model)"),
+    ("qwen3.6:35b",  "chat",  21.0, "35B-A3B MoE, faster (Alibaba model)"),
+    ("llama3.3:70b", "chat",  43.0, "strong all-rounder, slower"),
+    ("deepseek-r1:70b", "chat", 43.0, "reasoning specialist"),
+    ("nomic-embed-text", "embedding", 0.3, "default embedder, 768-dim"),
+    ("bge-m3",       "embedding", 1.2, "multilingual / long context"),
+    ("mxbai-embed-large", "embedding", 0.7, "alternative embedder"),
+    ("llava",        "vision", 4.7,  "figure descriptions — widely compatible"),
+    ("moondream",    "vision", 1.7,  "small vision model"),
 ]
+
+# A model needs room for weights plus KV cache/context; 1.2x is a rough floor.
+FIT_FACTOR = 1.2
+
+
+def fits(size_gb):
+    return size_gb * FIT_FACTOR <= USABLE_MEM_GB
 KNOWN_BAD = {
     "llama3.2-vision": "needs the 'mllama' architecture, unsupported by the "
-                       "Spark's Ollama build (fails with 'unknown model architecture')",
+                       "some Ollama builds (fails with 'unknown model architecture')",
 }
 
 
@@ -322,8 +364,9 @@ def cmd_list():
         total += size
         print(f"  {name:34} {human(size):>9}   {role_of(name)}")
     print(f"\n  {len(models)} model(s), {human(total)} on disk")
-    print("  (the DGX Spark's 128 GB unified memory holds ~110 GB of loaded models;\n"
-          "   disk usage can safely exceed that — only what's loaded matters)")
+    print(f"  (this machine can hold ~{USABLE_MEM_GB:.0f} GB of *loaded* models; disk "
+          f"usage may safely exceed that\n"
+          f"   — only what's resident matters. See: python3 platform_probe.py)")
 
 
 def cmd_loaded():
@@ -431,14 +474,25 @@ def cmd_remove(name):
         bad("removal failed (check the exact tag with --list)")
 
 
-def cmd_suggest():
-    step("Starting points known to work on this hardware")
+def cmd_suggest(show_all=False):
+    step(f"Starting points that fit this machine (~{USABLE_MEM_GB:.0f} GB usable)")
     warn("this short list is built into the script and WILL age — "
          "use --browse / --tags for the live catalogue")
     have = {m.get("name") for m in installed(soft=True)}
-    for name, role, note in SUGGESTED:
+    hidden = 0
+    for name, role, size, note in SUGGESTED:
+        if not fits(size) and not show_all:
+            hidden += 1
+            continue
         mark = f"{G}installed{X}" if name in have or f"{name}:latest" in have else "         "
-        print(f"  {mark}  {name:22} {role:10} {note}")
+        flag = "" if fits(size) else "   [too big for this machine]"
+        print(f"  {mark}  {name:22} {role:10} ~{size:>4.1f} GB  {note}{flag}")
+    if hidden:
+        info(f"{hidden} model(s) hidden as too large for ~{USABLE_MEM_GB:.0f} GB "
+             f"— use --all to see them")
+    if not any(fits(sz) for _, role, sz, _ in SUGGESTED if role == "chat"):
+        warn(f"no chat model in this list fits ~{USABLE_MEM_GB:.0f} GB. Smaller "
+             f"quantisations exist — try:  python3 manage_models.py --tags gemma4")
     print()
     for name, why in KNOWN_BAD.items():
         bad(f"avoid {name}: {why}")
@@ -538,7 +592,7 @@ def main():
     if a.tags:
         cmd_tags(a.tags.split(":")[0], a.all)
     if a.suggest:
-        cmd_suggest()
+        cmd_suggest(a.all)
     if a.add:
         cmd_add(a.add)
     if a.test:

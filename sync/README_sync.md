@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.02.8**
+**Version 2026.08.03.2**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -540,7 +540,7 @@ It also indexes **standalone image files** — `.png`, `.jpg/.jpeg`, `.tif/.tiff
 
 Each figure/image description doc is stamped with a **source-unique content id** (the md5 of the source file), so two different figures — even from the same paper (e.g. a `.html` plus a `.gif` and a `.jpg`) — can never collide on Open WebUI's content-hash dedup and be wrongly rejected as "duplicate."
 
-> **Vision model note (DGX Spark).** The default is **`llava`**, not Llama 3.2 Vision. The Spark's custom Blackwell-optimized Ollama build does **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
+> **Vision model note.** The default is **`llava`**, not Llama 3.2 Vision. Several Ollama builds — including the DGX Spark's custom Blackwell-optimized one — do **not** support the `mllama` architecture that Llama 3.2 Vision uses — it fails to load with `unknown model architecture: 'mllama'` (a 500 from Ollama). LLaVA uses a supported architecture and works. If you need a specific vision model this build won't load, run a stock Ollama in a container just for it (`docker run -d --name ollama-vision --gpus all -p 11435:11434 ollama/ollama`) and point the script at it with `RAG_OLLAMA_URL=http://localhost:11435`.
 
 > **Important — numbers are approximate.** Vision models reliably capture *what* a figure shows and its trends, but they **hallucinate exact chart values**. Treat extracted numbers as approximate and verify against the source figure. For precise datapoints use a plot-digitizer tool. This is a retrieval/understanding aid, not a data-extraction guarantee, and it's slower than a text-only sync (one model call per page), so it's opt-in.
 
@@ -639,7 +639,7 @@ image — that's the whole prevention.
 busy` fails while the backend is OK, because the UI's model-list call is queued
 behind thousands of vision-model requests. `sudo docker restart open-webui` clears
 the symptom; to prevent it, let Ollama serve concurrently (both models fit in the
-Spark's 128 GB):
+machine's memory):
 
 ```bash
 sudo systemctl edit ollama

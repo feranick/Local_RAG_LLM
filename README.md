@@ -1,8 +1,10 @@
-# Local RAG on NVIDIA DGX Spark
+# Local RAG on a Linux workstation
 
-**Version 2026.08.02.7**
+**Version 2026.08.03.2**
 
-Automated setup for running **retrieval-augmented generation (RAG) entirely on your DGX Spark** — point a local Gemma model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
+Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
+
+The scripts detect the hardware they're running on and adapt: model menus only offer models the machine can actually hold. Developed and used daily on an **NVIDIA DGX Spark** (GB10, 128 GB unified memory), and equally at home on a workstation with a single GPU — or none.
 
 This repo reproduces, in a few scripts, the stack:
 
@@ -21,6 +23,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 
 | File | What it does |
 |------|--------------|
+| `platform_probe.py` | Detects CPU, RAM, GPU/VRAM and Docker GPU support, and derives how much model this machine can hold. `--write` saves `hardware.conf`, which every other script reads — so all of them agree, and you can override any of it by hand. |
 | `setup_local_rag.sh` | Installs Ollama, configures it for container access (creates a systemd service if none exists), interactively selects + pulls the chat/embedding/vision models, and launches Open WebUI + AnythingLLM. Idempotent — safe to re-run. |
 | `llm_stack_healthcheck.sh` | Verifies every component: Ollama API, GPU, an embedding model, a live generation test (auto-detects whichever chat model is installed), both containers, container→Ollama connectivity, reboot-safe restart policies, and any optional add-ons (Tika, vision model). Model-agnostic — adapts to whatever you selected at setup. |
 | `update_local_rag.sh` | Updates the stack when newer images exist — refreshes the containers (Open WebUI, AnythingLLM, and Tika/vision if present) while preserving data. `--check` reports without changing. |
@@ -34,11 +37,21 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 
 ## Prerequisites
 
-- NVIDIA DGX Spark (GB10, ARM64) running Ubuntu 24.04 / DGX OS
-- Docker + NVIDIA Container Toolkit (ship with DGX OS)
+- Linux, x86_64 or ARM64 (developed on Ubuntu 24.04 / DGX OS)
+- Docker; plus the **NVIDIA Container Toolkit** if you have an NVIDIA GPU and want containers to use it
+- An NVIDIA GPU is recommended, not required — with none, inference runs on CPU (functional, slow)
 - Internet access for the first run (to pull the installer, images, and models)
 
-Both Docker images are multi-arch and run natively on ARM64.
+Both Docker images are multi-arch, so x86_64 and ARM64 both work.
+
+**What can this machine run?** `platform_probe.py` answers that once and writes it where every script reads it:
+
+```bash
+python3 common/platform_probe.py            # summary: CPU, RAM, GPU, usable model memory
+python3 common/platform_probe.py --write    # save it as hardware.conf
+```
+
+The budget it derives — VRAM for a discrete GPU, ~85% of RAM for unified memory, ~60% for CPU-only — is what `setup_local_rag.sh` and `manage_models.py` use to decide which models to offer. Hand-edits to `hardware.conf` win over detection, and `RAG_USABLE_MEM_GB` overrides both.
 
 ---
 
@@ -60,10 +73,10 @@ The setup script will, in order:
 2. Ensure Ollama listens on `0.0.0.0:11434` so containers can reach it. If a systemd service exists it adds a bind override; if none exists (e.g. a manual `ollama serve`) it creates a proper service that runs as your user and starts on boot.
 3. Wait for the Ollama API to come up.
 4. Pull the chat model and the embedding model (skipped if already present).
-5. Launch **Open WebUI** on port 3000 (with `--gpus all` when a GPU test succeeds).
+5. Launch **Open WebUI** on port 3000 (with `--gpus all` when an NVIDIA GPU *and* a Docker GPU runtime are both present — otherwise it says so and starts on CPU).
 6. Create AnythingLLM's storage folder with the correct ownership and launch **AnythingLLM** on port 3001.
 
-After pulling, the script **verifies each model actually loads** (a tiny generate/embeddings call), not just that it downloaded — so a model that's pulled but won't run on this Ollama build (like `llama3.2-vision`'s `mllama` architecture) is flagged immediately rather than failing later.
+After pulling, the script **verifies each model actually loads** (a tiny generate/embeddings call), not just that it downloaded — so a model that's pulled but won't run on your Ollama build (like `llama3.2-vision`'s `mllama` architecture) is flagged immediately rather than failing later.
 
 It's safe to re-run: containers are recreated cleanly, while pulled models, Ollama config, and data volumes are preserved. When run with `sudo`, it correctly targets your real home directory (not root's).
 
@@ -71,11 +84,13 @@ It's safe to re-run: containers are recreated cleanly, while pulled models, Olla
 
 When run in a terminal, the script **interactively prompts you to pick the models** — press Enter for the default or type a number / custom tag:
 
-- **Chat model (LLM):** `gemma4:26b` (default, MoE — fast), `gemma4:31b`, `gemma4:12b`, `llama3.3:70b`, `qwen3.6:27b` (dense, higher quality), `qwen3.6:35b` (35B-A3B MoE, faster), or a custom tag.
-- **Embedding model:** `nomic-embed-text` (default), `mxbai-embed-large`, `bge-m3`, or custom.
-- **Vision model (optional, for figure/image descriptions):** `llava` (default — loads on the Spark), `moondream`, `bakllava`, `none`, or custom.
+**Only models that fit the detected hardware are listed**, so the menu on a 16 GB GPU is shorter than on a 128 GB Spark. `c` still accepts any tag you like.
 
-(Note: `qwen3.6` is an Alibaba model — listed for completeness; it and other Chinese models are your call. For vision, avoid `llama3.2-vision` on the Spark — its `mllama` architecture won't load on this build; `llava` works.)
+- **Chat model (LLM):** `gemma4:26b` (preferred default when it fits — MoE, fast), then `gemma4:12b`, then `gemma4:e2b` on small machines. `gemma4:31b`, `qwen3.6:27b`, `qwen3.6:35b` and `llama3.3:70b` appear when there's room. The default is the first *preferred* model that fits, not the largest — a 70B model fits 128 GB but is slower than a 26B MoE for the same work.
+- **Embedding model:** `nomic-embed-text` (default), `mxbai-embed-large`, `bge-m3`, or custom.
+- **Vision model (optional, for figure/image descriptions):** `llava` (default when it fits), `moondream` (smaller), `bakllava`, `none`, or custom.
+
+(Note: `qwen3.6` is an Alibaba model — listed for completeness; it and other Chinese models are your call. Avoid `llama3.2-vision`: its `mllama` architecture fails to load on several Ollama builds, including the Spark's — `llava` works everywhere.)
 
 ### Options / non-interactive
 
@@ -119,8 +134,8 @@ embedding), tag count and popularity, marks the ones you already have, and hides
 **cloud-only** models — those run on Ollama's servers, not on your Spark.
 
 `--tags NAME` is the one to run before `--add`. It prints every tag with its
-download size and context window, flags anything larger than the ~110 GB this
-machine can hold, and hides the `*-mlx*` tags (Apple-silicon builds) and `*cloud*`
+download size and context window, flags anything larger than this machine
+can hold (from the probe), and hides the `*-mlx*` tags (Apple-silicon builds) and `*cloud*`
 tags, which cannot run here at all. Add `--all` to either command to see everything.
 
 ```
@@ -190,6 +205,25 @@ The scripts stand up the services; the last mile is done once in each web UI.
    - **Embedding Model:** this is a **free-text field, not a dropdown** — it will not auto-populate. Click into it and *type* the model name exactly as `ollama list` shows it: `nomic-embed-text` (use `nomic-embed-text:latest` if the short name is rejected). Then scroll down and click **Save** — the field doesn't apply until you save.
    - If you'd already uploaded documents, click **Reindex** afterward so they're re-embedded with this model.
    - (Optional) Chunk Size defaults to 1000 / overlap 100. For dense research papers, ~1500 / ~200 can improve retrieval; leave defaults otherwise.
+   - **Raise Top K — this one matters more than it looks.** The default (`3`) means
+     only three chunks are retrieved per question, which behaves like a much smaller
+     library: a short, highly specific document has to out-rank two hits from your
+     longest manuals, and usually loses unless the question happens to echo its
+     wording. Set **Top K to 10–15**. This is a query-time setting, so **no
+     re-indexing is needed** — unlike chunk size, it applies to the next question.
+     The cost is a larger prompt per query (15 × ~1500 chars ≈ 6k tokens, negligible
+     against a 256K context but not against memory bandwidth), so try 10 first.
+     **Hybrid Search** (BM25 keyword matching + reranking) is *in principle* the
+     other half of this — it's what lets a brief note with distinctive terms compete
+     against long documents — but only enable it deliberately, per the next point.
+   - **Hybrid Search can make retrieval *worse* if its reranker isn't working.**
+     Observed here: with hybrid on, a short note stopped being retrieved by models
+     that found it reliably with hybrid off — the reranker (and any **Relevance
+     Threshold** above `0`) filters results *after* retrieval, so a misconfigured
+     reranker silently removes good chunks. If enabling it hurts, either set
+     **Reranking Model** explicitly and let it download on first use with
+     **Relevance Threshold `0`**, or simply leave hybrid search off. Change Top K and
+     hybrid search **one at a time**, or you can't tell which one did what.
 3. **Workspace → Knowledge → +** to create a collection and upload files (see "Chatting with your papers" below for how to use it).
    - If you'll index large documents (books, theses, 100+ pages), also set
      **Embedding Batch Size** to `32` and **Embedding Concurrent Requests** to `4`
@@ -198,7 +232,7 @@ The scripts stand up the services; the last mile is done once in each web UI.
      `Too many open files`. The setup script also launches the container with
      `--ulimit nofile=65536:65536` for the same reason.
 4. Set Gemma as the default and hide the embedding model from the chat list:
-   - **Default chat model:** your **Settings → General → Default Model** → `gemma4:26b` (so new chats start on Gemma, not the embedding model). Note this is *not* the "Local/External Task Model" under Admin → Settings → Interface — that's only for background tasks like title/tag generation; leave it on "Current Model".
+   - **Default chat model:** your **Settings → General → Default Model** → `gemma4:26b` (so new chats start on Gemma, not the embedding model). This is *not* the "Task Model (Local/External)" under Admin Panel → Settings → Interface — that one runs background chores (titles, tags, follow-up suggestions, autocomplete). Leaving it on "Current Model" makes your big chat model write three-word titles; see *Follow-up suggestions, titles and tags* below for why pinning a tiny model there is worth it.
    - **Hide the embedding model:** **Admin Panel → Settings → Models** → toggle `nomic-embed-text` off. It stays available for embedding documents; this just removes it from the chat dropdown so it can't be picked (or auto-selected) as a chat model.
 
 > **Why a separate embedding model?** The chat model (Gemma) writes answers; the embedding model turns your documents into vectors for retrieval. Without one, uploads silently fail. This is why the setup pulls `nomic-embed-text` alongside the chat model. It is not a chat model — never select it to chat with (see troubleshooting if a chat echoes your prompt back).
@@ -297,6 +331,41 @@ Practical guidance:
   unsupported upstream.
 - Test a new chat model with one question you know the answer to *before* trusting it
   for real work. The failure mode is a confident "not in the documents", not an error.
+
+### Local notes that must always apply: a second collection in Full Context
+
+Retrieval is a ranking contest, and a short "how we actually do it here" note usually
+loses it against long vendor manuals — it only wins when your question happens to
+echo its wording. If a document's whole purpose is to state local practice, take it
+out of the contest:
+
+1. **Workspace → Knowledge → + Create** a second collection, e.g. `Lab Notes`. Give it
+   a description that says what it's for — models searching across bases see it.
+2. Put the notes in it: drag them into the UI, or sync a small folder with its own
+   config. Same instance means the same `KEY_FILE`, but the **`STATE_FILE` must be
+   distinct** from your main library's:
+
+   ```ini
+   # lab_notes.conf
+   BASE_URL   = http://localhost:3002
+   TARGET     = <the new collection id>
+   WATCH_DIR  = ~/lab_notes
+   KEY_FILE   = ~/.rag_sync_key_open-webui-breakerspace
+   STATE_FILE = ~/.rag_sync_state_lab_notes.json
+   ```
+
+3. **Workspace → Models → <your preset> → Knowledge** → attach `Lab Notes` *alongside*
+   the main collection.
+4. **Click the attached `Lab Notes` chip** to switch it from **Focused Retrieval** to
+   **Full Context**. Leave the big library on Focused Retrieval.
+5. Add a precedence line to the preset's system prompt:
+   *"Lab Notes describes local practice at this facility and takes precedence over
+   vendor documentation where they conflict."*
+
+Full Context injects the content verbatim in **every** message, regardless of tool
+calling or Top K — so it can't be out-ranked, and it works identically on every chat
+model. The trade-off is that it always occupies context, so keep this collection to a
+handful of short notes; anything longer belongs in the retrieved library.
 
 ### Follow-up suggestions, titles and tags: the task model
 
@@ -485,7 +554,7 @@ sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags |
 The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting Gemma as the default model and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).
 
 **Ollama runs at half speed / high CPU, or a generation is very slow.**
-Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. On the Spark's 128 GB unified memory (~110 GB usable), keep models comfortably under the ceiling to leave room for the KV cache. A slow first response is often just the model loading from disk.
+Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. Keep models comfortably under the detected ceiling (`python3 common/platform_probe.py`) to leave room for the KV cache. A slow first response is often just the model loading from disk.
 
 **Unloading a model from memory.**
 `ollama ps` shows what's loaded; `ollama stop <model>` unloads it immediately. Ollama also auto-unloads after ~5 min idle (tune with the `keep_alive` setting or `OLLAMA_KEEP_ALIVE`).
@@ -514,6 +583,6 @@ Start with **AnythingLLM** for a pure "know my papers" use case; run **Open WebU
 
 ## Model notes
 
-Sizes that fit the Spark's 128 GB unified memory (~110 GB usable), roughly: FP16 up to ~55B params, INT8 up to ~110B, and 4-bit/NVFP4 up to ~200B. The real bottleneck is memory bandwidth (~273 GB/s), so bigger models fit but generate more slowly — 4-bit quants are the sweet spot.
+Rough sizing per byte-per-parameter: FP16 needs ~2 GB per billion parameters, INT8 ~1 GB, 4-bit ~0.5 GB. So a 24 GB GPU holds a ~12B model at FP16 or a ~45B at 4-bit; the Spark's ~110 GB usable holds ~55B at FP16 or ~200B at 4-bit. Memory bandwidth is usually the real limit (~273 GB/s on the Spark), so a model that merely *fits* can still be slow — 4-bit quants are generally the sweet spot.
 
 This stack defaults to `gemma4:26b` (a mixture-of-experts model, ~4B active params per token — fast on the Spark's bandwidth). Other good picks: `gemma4:31b`, `llama3.3:70b`, `qwen3.6:27b`, `qwen3.6:35b`. Whatever tag `ollama list` shows is what you select as the chat model — change it with `--chat-model` or in the UI at any time.

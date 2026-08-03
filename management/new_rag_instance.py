@@ -27,7 +27,7 @@ Usage:
   python3 new_rag_instance.py --dry-run          # show the docker command only
 """
 
-__version__ = "2026.08.03.1"
+__version__ = "2026.08.03.2"
 
 import os
 import sys
@@ -121,10 +121,18 @@ def main():
 
     # ---------- 2. launch the container ----------
     step(f"2/6  Container '{a.name}' on port {a.port}")
+    # GPU passthrough, if this machine actually has a GPU. Testing it costs a
+    # ~200 MB image pull, so skip that entirely when nvidia-smi isn't even present.
     gpu = []
-    if run(DOCKER + ["run", "--rm", "--gpus", "all",
-                     "nvidia/cuda:12.6.0-base-ubuntu24.04", "true"]).returncode == 0:
-        gpu = ["--gpus", "all"]
+    if shutil.which("nvidia-smi"):
+        if run(DOCKER + ["run", "--rm", "--gpus", "all",
+                         "nvidia/cuda:12.6.0-base-ubuntu24.04", "true"]).returncode == 0:
+            gpu = ["--gpus", "all"]
+        else:
+            warn("GPU present but docker can't pass it through — starting on CPU "
+                 "(install nvidia-container-toolkit)")
+    else:
+        info("no NVIDIA GPU detected — this instance will run on CPU")
 
     docker_run = DOCKER + [
         "run", "-d", "--name", a.name, "--restart", "always",

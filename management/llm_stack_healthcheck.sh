@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # llm_stack_healthcheck.sh
-# Tests the local LLM stack on the DGX Spark: Ollama, Open WebUI, AnythingLLM.
+# Tests the local LLM stack (Ollama, Open WebUI, AnythingLLM) on any Linux host.
+# Reports the detected hardware so the numbers match what setup_local_rag.sh used.
 #
 # Usage:
 #   chmod +x llm_stack_healthcheck.sh
@@ -79,20 +80,38 @@ else
 fi
 
 # -----------------------------------------------------------------
-head "2. GPU"
+head "2. Hardware / GPU"
 
-if command -v nvidia-smi >/dev/null 2>&1; then
+# Prefer the shared probe so this report and the setup script agree on the
+# numbers; fall back to querying nvidia-smi directly if it isn't around.
+PROBE=""
+for p in "$(dirname "$0")/platform_probe.py" "$(dirname "$0")/../common/platform_probe.py"; do
+  [ -f "$p" ] && { PROBE="$p"; break; }
+done
+if [ -n "$PROBE" ] && command -v python3 >/dev/null 2>&1; then
+  eval "$(python3 "$PROBE" --shell 2>/dev/null || true)"
+  echo "      arch: ${RAG_ARCH:-?}   ram: ${RAG_RAM_GB:-?} GB   memory model: ${RAG_MEMORY_KIND:-?}"
+  if [ "${RAG_GPU_COUNT:-0}" != "0" ]; then
+    ok "GPU visible: ${RAG_GPU_NAMES} (${RAG_VRAM_GB} GB VRAM, driver ${RAG_DRIVER:-?})"
+  else
+    warn "no NVIDIA GPU detected — inference will run on CPU (slow but functional)"
+  fi
+  ok "usable for models: ${RAG_USABLE_MEM_GB} GB"
+  [ "${RAG_GPU_COUNT:-0}" != "0" ] && [ "${RAG_DOCKER_GPU:-no}" = "no" ] && \
+    warn "docker has no GPU runtime — containers run on CPU (install nvidia-container-toolkit)"
+elif command -v nvidia-smi >/dev/null 2>&1; then
   GPU=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | tr -d '\r')
   if [ -n "$GPU" ] && [ "$GPU" != "-1" ]; then
     ok "GPU visible: $GPU"
-    # memory line is informational; GB10 unified memory may report [N/A]
     MEM=$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1 | tr -d '\r')
     [ -n "$MEM" ] && echo "      memory (used/total): $MEM"
   else
-    warn "nvidia-smi present but returned no usable name (unified-memory quirk on GB10 — usually harmless)"
+    warn "nvidia-smi present but returned no usable name (a unified-memory quirk on"
+    warn "some parts, e.g. GB10 — usually harmless)"
   fi
+  warn "platform_probe.py not found — run it for the full picture"
 else
-  warn "nvidia-smi not found on PATH"
+  warn "no nvidia-smi and no platform_probe.py: assuming CPU-only inference"
 fi
 
 # -----------------------------------------------------------------

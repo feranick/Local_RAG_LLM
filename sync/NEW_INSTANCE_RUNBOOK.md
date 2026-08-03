@@ -1,6 +1,6 @@
 # New library runbook — a second RAG instance
 
-**Version 2026.08.01.1**
+**Version 2026.08.03.2**
 
 Every command in order, with a checkpoint after each stage. Use this when you want
 an **independent library** — its own documents, its own collection, and (the usual

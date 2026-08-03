@@ -1,9 +1,10 @@
 # pyproject.toml — build Local_RAG_LLM as a wheel.
 #
-# Repo layout is flat script folders (management/, migration/, sync/) with no
-# __init__.py, so nothing here asks you to move files: the wheel remaps those
-# three directories under a single import namespace.
+# Repo layout is flat script folders (common/, management/, migration/, sync/)
+# with no __init__.py, so nothing here asks you to move files: the wheel remaps
+# those directories under a single import namespace.
 #
+#     common/platform_probe.py     ->  local_rag_llm/common/platform_probe.py
 #     management/manage_models.py  ->  local_rag_llm/management/manage_models.py
 #     migration/migrate_rag.py     ->  local_rag_llm/migration/migrate_rag.py
 #     sync/sync_folder.py          ->  local_rag_llm/sync/sync_folder.py
@@ -12,7 +13,7 @@
 #
 # Build and install:
 #     python3 -m pip install --upgrade build
-#     python3 -m build --wheel            # -> dist/local_rag_llm-2026.8.3.1-py3-none-any.whl
+#     python3 -m build --wheel            # -> dist/local_rag_llm-2026.8.3.2-py3-none-any.whl
 #     python3 -m pip install dist/*.whl
 #
 # After installing you get console commands (rag-sync, rag-models, …) on PATH,
@@ -24,15 +25,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "local-rag-llm"
-# PEP 440 normalises "2026.08.03.1" to "2026.8.3.1" (leading zeros are dropped),
+# PEP 440 normalises "2026.08.03.2" to "2026.8.3.2" (leading zeros are dropped),
 # so the version is written in normalised form here to match the wheel filename.
-# The scripts themselves carry __version__ = "2026.08.03.1".
-version = "2026.8.3.1"
-description = "Local RAG stack for the NVIDIA DGX Spark: Ollama + Open WebUI, folder sync, model management and machine migration"
+# The scripts themselves carry __version__ = "2026.08.03.2".
+version = "2026.8.3.2"
+description = "Self-hosted RAG stack for Linux workstations: Ollama + Open WebUI, folder sync, hardware-aware model management and machine migration"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "Nicola Ferralis", email = "ferralis@generalflash.com" }]
-keywords = ["rag", "ollama", "open-webui", "dgx-spark", "embeddings", "retrieval"]
+keywords = ["rag", "ollama", "open-webui", "embeddings", "retrieval", "dgx-spark"]
 classifiers = [
   "Environment :: Console",
   "Intended Audience :: Science/Research",
@@ -59,6 +60,7 @@ Repository = "https://github.com/feranick/Local_RAG_LLM"
 # own argument parsing, so `rag-sync --status` behaves exactly like
 # `python3 sync/sync_folder.py --status`.
 [project.scripts]
+rag-probe          = "local_rag_llm.common.platform_probe:main"
 rag-sync           = "local_rag_llm.sync.sync_folder:main"
 rag-library-stats  = "local_rag_llm.sync.library_stats:main"
 rag-diag-duplicate = "local_rag_llm.sync.diag_duplicate:main"
@@ -70,15 +72,16 @@ rag-migrate        = "local_rag_llm.migration.migrate_rag:main"
 # Wheel contents
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.wheel]
-# Only these three folders ship as importable code; proxify is a git submodule
+# Only these folders ship as importable code; proxify is a git submodule
 # and is deliberately left out of the wheel (it is a separate project), as is
 # test/ (a duplicate of management/llm_stack_healthcheck.sh).
-only-include = ["management", "migration", "sync"]
+only-include = ["common", "management", "migration", "sync"]
 # the .sh files are installed as executables below, so keep them out of the
 # importable package to avoid shipping each one twice
 exclude = ["**/*.sh"]
 
 [tool.hatch.build.targets.wheel.sources]
+"common" = "local_rag_llm/common"
 "management" = "local_rag_llm/management"
 "migration" = "local_rag_llm/migration"
 "sync" = "local_rag_llm/sync"
@@ -105,6 +108,7 @@ exclude = ["**/*.sh"]
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.sdist]
 include = [
+  "common",
   "management",
   "migration",
   "sync",
