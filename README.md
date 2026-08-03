@@ -200,8 +200,33 @@ python3 manage_models.py --remove gemma4:12b    # reclaim disk space
 ```
 
 Then pick it in the UI's model dropdown, or make it the default with
-**Settings → General → Default Model** (`--set-default TAG` attempts this via the
-API and falls back to telling you where to click).
+set it as the **Selected Model** (what "default model" is now called):
+
+- **instance-wide:** **Settings → Admin → AI → Models** → the model's ellipsis **⋯** → **Set as Selected Model** (env: `DEFAULT_MODELS`)
+- **just for you:** the model selector inside a chat → **Set as default**, which wins over the instance setting
+
+`--set-default TAG` tries the API and, when the build doesn't expose it, prints the
+alternatives instead of pretending. A new chat resolves in this order: URL parameter
+→ models bound to the chat's folder → your own default → the instance's Selected
+Models → **first available model**.
+
+> **Setting it for a workspace preset (v0.11.0).** Presets aren't listed under
+> **Admin → AI → Models** — that page lists *base* models — so there's no ⋯ menu to
+> use, and `/api/v1/configs/…` isn't exposed. Two things that do work:
+>
+> - **Curate the picker.** Because resolution ends at *first available model*, hiding
+>   the base models (the **eye** icon, one row per model) makes everyone land on your
+>   preset. Leave them **enabled** — the toggle on the right — since hiding is not
+>   disabling and a preset always needs access to its base model. Set the preset to
+>   **Public** too, or other users can't select it. Bonus: nobody can accidentally
+>   chat with `nomic-embed-text`.
+> - **Per user:** open a chat, pick the model, then **Set as default** in the same
+>   dropdown. A user's own default outranks the instance setting.
+>
+> `DEFAULT_MODELS` as a container env var looks tempting but is a **PersistentConfig**
+> value: once the database holds a value the env var is ignored, and the documented
+> override (`ENABLE_PERSISTENT_CONFIG=False`) makes *every* UI-configured setting —
+> Top K, hybrid search, embedding model — revert on each restart. Not a good trade.
 
 The verification step matters on this hardware: `--add` always follows the pull with
 a real generate/embeddings call, because a model can download perfectly and still
@@ -273,7 +298,7 @@ The scripts stand up the services; the last mile is done once in each web UI.
      `Too many open files`. The setup script also launches the container with
      `--ulimit nofile=65536:65536` for the same reason.
 4. Set Gemma as the default and hide the embedding model from the chat list:
-   - **Default chat model:** your **Settings → General → Default Model** → `gemma4:26b` (so new chats start on Gemma, not the embedding model). This is *not* the "Task Model (Local/External)" under Admin Panel → Settings → Interface — that one runs background chores (titles, tags, follow-up suggestions, autocomplete). Leaving it on "Current Model" makes your big chat model write three-word titles; see *Follow-up suggestions, titles and tags* below for why pinning a tiny model there is worth it.
+   - **Default chat model:** set your chat model as the **Selected Model** — **Settings → Admin → AI → Models** → its ellipsis **⋯** → **Set as Selected Model** — so new chats start there rather than on the embedding model. (Per-user equivalent: **Set as default** in the model selector inside a chat.) This is *not* the "Task Model (Local/External)" under Admin Panel → Settings → Interface — that one runs background chores (titles, tags, follow-up suggestions, autocomplete). Leaving it on "Current Model" makes your big chat model write three-word titles; see *Follow-up suggestions, titles and tags* below for why pinning a tiny model there is worth it.
    - **Hide the embedding model:** **Admin Panel → Settings → Models** → toggle `nomic-embed-text` off. It stays available for embedding documents; this just removes it from the chat dropdown so it can't be picked (or auto-selected) as a chat model.
 
 > **Why a separate embedding model?** The chat model (Gemma) writes answers; the embedding model turns your documents into vectors for retrieval. Without one, uploads silently fail. This is why the setup pulls `nomic-embed-text` alongside the chat model. It is not a chat model — never select it to chat with (see troubleshooting if a chat echoes your prompt back).
@@ -592,7 +617,7 @@ sudo docker exec open-webui curl -s http://host.docker.internal:11434/api/tags |
 ```
 
 **The chat echoes my prompt back verbatim instead of answering.**
-The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting Gemma as the default model and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).
+The chat is pointed at the **embedding model** (`nomic-embed-text`), which can't generate text. Switch the model at the top of the chat to `gemma4:26b`. Prevent it recurring by setting your chat model as the **Selected Model** and hiding `nomic-embed-text` from the chat list (see the Open WebUI config steps above).
 
 **Ollama runs at half speed / high CPU, or a generation is very slow.**
 Ollama silently splits a model across CPU and GPU when it thinks GPU memory is short. Check with `ollama ps` — if it shows a CPU/GPU split, choose a smaller model or a heavier quant. Keep models comfortably under the detected ceiling (`python3 common/platform_probe.py`) to leave room for the KV cache. A slow first response is often just the model loading from disk.

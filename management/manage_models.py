@@ -448,7 +448,8 @@ def cmd_add(name):
         if role == "chat":
             ok("ready to use — select it in the UI's model dropdown")
             info("no re-indexing needed: the chat model isn't part of the stored vectors")
-            info("to make it the default: Settings → General → Default Model")
+            info("to start new chats on it: Settings → Admin → AI → Models → ⋯ → "
+                 "Set as Selected Model")
         elif role == "vision":
             ok("ready for figure descriptions")
             info(f"use it with:  RAG_FIGURE_MODEL={name} python3 sync_folder.py --describe-figures")
@@ -499,35 +500,119 @@ def cmd_suggest(show_all=False):
     print("\n  add one with:  python3 manage_models.py --add <tag>")
 
 
+def _api_json(session, method, url, **kw):
+    """Return parsed JSON, or None if this isn't really an API endpoint.
+
+    Open WebUI serves a single-page app at '/', and its catch-all returns the
+    index page with **HTTP 200 and text/html** for unknown paths. A plain
+    `response.ok` check therefore reports success for routes that don't exist —
+    which is exactly how an earlier version of this function claimed to have set
+    the default model while doing nothing at all. Insist on JSON.
+    """
+    try:
+        r = session.request(method, url, timeout=20, **kw)
+    except Exception:
+        return None
+    if not r.ok:
+        return None
+    if "application/json" not in r.headers.get("Content-Type", ""):
+        return None
+    try:
+        return r.json()
+    except ValueError:
+        return None
+
+
+def _default_model_help(instance, name):
+    """What to do when the API can't set this — the routes move between versions."""
+    info("Options, most reliable first:")
+    print()
+    print("  1. Curate the picker so the preset is the only thing to land on.")
+    print("     A new chat resolves: URL param > folder models > the user's own")
+    print("     default > the instance's Selected Models > FIRST AVAILABLE MODEL.")
+    print("     So hide the base models and everyone starts on your preset:")
+    print(f"       {instance} → Admin → Settings → AI → Models → the eye icon")
+    print("     Keep them ENABLED (the toggle on the right) — hide is not disable,")
+    print("     and a preset always needs access to its base model. Also set the")
+    print("     preset itself to Public, or other users can't select it.")
+    print()
+    print("  2. Per user, no admin rights needed: open a chat, pick the model,")
+    print("     then 'Set as default' in the same dropdown. A user's own default")
+    print("     outranks the instance setting.")
+    print()
+    print("  3. DEFAULT_MODELS as a container env var — but note it is a")
+    print("     PersistentConfig value: once the database holds a value, the env")
+    print("     var is ignored. ENABLE_PERSISTENT_CONFIG=False forces env to win,")
+    print("     at the cost of every UI-configured setting (Top K, hybrid search,")
+    print("     embedding model…) reverting on each restart. Rarely worth it.")
+    print()
+    if ":" not in name:
+        info(f"'{name}' has no ':' so it looks like a workspace preset id. Those are "
+             "not listed under Admin → AI → Models at all (that page lists base "
+             "models), which is why there is no ⋯ menu to use for them.")
+
+
 def cmd_set_default(name, instance, key_file):
-    """Best-effort: set the instance's default chat model via the API."""
-    step(f"Setting {name} as the default model on {instance}")
-    if role_of(name) != "chat":
-        warn(f"{name} looks like a {role_of(name)} model — that is probably not what "
-             "you want as the chat default")
+    """Try to set the instance's Selected Model ("default") via the API.
+
+    Deliberately conservative: it verifies by reading the setting back, and says
+    plainly when the version doesn't expose it rather than pretending.
+    """
+    step(f"Setting {name} as the Selected (default) model on {instance}")
+    if role_of(name) != "chat" and ":" in name:
+        warn(f"{name} looks like a {role_of(name)} model — probably not what you "
+             "want as the chat default")
     key = ""
     kf = pathlib.Path(key_file).expanduser()
     if kf.is_file():
         key = kf.read_text().strip()
     if not key:
         warn(f"no API key found at {kf} — cannot call the API")
-        info(f"set it in the UI instead: {instance} → Settings → General → Default Model")
+        _default_model_help(instance, name)
         return
-    h = {"Authorization": f"Bearer {key}"}
-    for path, payload in (
-        ("/api/v1/configs/default/models", {"models": [name]}),
-        ("/api/v1/configs/default/models", {"DEFAULT_MODELS": name}),
-        ("/api/v1/configs/default", {"models": [name]}),
-    ):
-        try:
-            r = requests.post(f"{instance}{path}", headers=h, json=payload, timeout=20)
-            if r.ok:
-                ok(f"default model set to {name}")
-                return
-        except Exception:
-            pass
-    warn("could not set it through the API (endpoint differs between versions)")
-    info(f"do it in the UI: {instance} → Settings → General → Default Model → {name}")
+
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {key}"})
+
+    # Find a config endpoint that actually exists on THIS build, by reading it
+    # first. Writing blind is how you end up believing a 200-with-HTML.
+    candidates = ("/api/v1/configs/models",
+                  "/api/v1/configs/default/models",
+                  "/api/v1/configs/default")
+    found = None
+    for path in candidates:
+        cur = _api_json(s, "GET", f"{instance}{path}")
+        if isinstance(cur, dict):
+            found = (path, cur)
+            info(f"config endpoint: {path}")
+            break
+    if not found:
+        warn("this build exposes no models-config endpoint (all candidates returned "
+             "the web app, not JSON)")
+        _default_model_help(instance, name)
+        return
+
+    path, cur = found
+    # Merge into whatever shape the server already uses, so nothing else is lost.
+    for field, value in (("DEFAULT_MODELS", name), ("models", [name])):
+        if field not in cur:
+            continue
+        body = dict(cur)
+        body[field] = value
+        if _api_json(s, "POST", f"{instance}{path}", json=body) is None:
+            continue
+        back = _api_json(s, "GET", f"{instance}{path}") or {}
+        if name in str(back.get(field, "")):
+            ok(f"Selected model set to {name} (verified)")
+            info("users who already chose their own default keep it — that wins")
+            return
+        warn(f"the POST was accepted but reading it back did not show {name}")
+        break
+    else:
+        warn(f"{path} exists but carries no recognisable default-model field "
+             f"(keys: {', '.join(sorted(cur)[:8])})")
+
+    _default_model_help(instance, name)
 
 
 def cmd_embedding_warning():
