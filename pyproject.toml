@@ -1,10 +1,11 @@
 # pyproject.toml — build Local_RAG_LLM as a wheel.
 #
-# Repo layout is flat script folders (management/, sync/) with no __init__.py, so
-# nothing here asks you to move files: the wheel remaps those two directories
-# under a single import namespace.
+# Repo layout is flat script folders (management/, migration/, sync/) with no
+# __init__.py, so nothing here asks you to move files: the wheel remaps those
+# three directories under a single import namespace.
 #
 #     management/manage_models.py  ->  local_rag_llm/management/manage_models.py
+#     migration/migrate_rag.py     ->  local_rag_llm/migration/migrate_rag.py
 #     sync/sync_folder.py          ->  local_rag_llm/sync/sync_folder.py
 #
 # That works without __init__.py because of PEP 420 implicit namespace packages.
@@ -63,21 +64,23 @@ rag-library-stats  = "local_rag_llm.sync.library_stats:main"
 rag-diag-duplicate = "local_rag_llm.sync.diag_duplicate:main"
 rag-models         = "local_rag_llm.management.manage_models:main"
 rag-new-instance   = "local_rag_llm.management.new_rag_instance:main"
-rag-migrate        = "local_rag_llm.management.migrate_rag:main"
+rag-migrate        = "local_rag_llm.migration.migrate_rag:main"
 
 # ---------------------------------------------------------------------------
 # Wheel contents
 # ---------------------------------------------------------------------------
 [tool.hatch.build.targets.wheel]
-# Only these two folders ship as importable code; proxify is a git submodule and
-# is deliberately left out of the wheel (it is a separate project).
-only-include = ["management", "sync"]
+# Only these three folders ship as importable code; proxify is a git submodule
+# and is deliberately left out of the wheel (it is a separate project), as is
+# test/ (a duplicate of management/llm_stack_healthcheck.sh).
+only-include = ["management", "migration", "sync"]
 # the .sh files are installed as executables below, so keep them out of the
 # importable package to avoid shipping each one twice
 exclude = ["**/*.sh"]
 
 [tool.hatch.build.targets.wheel.sources]
 "management" = "local_rag_llm/management"
+"migration" = "local_rag_llm/migration"
 "sync" = "local_rag_llm/sync"
 
 # The shell scripts are not importable, so they land in the environment's bin/
@@ -103,6 +106,7 @@ exclude = ["**/*.sh"]
 [tool.hatch.build.targets.sdist]
 include = [
   "management",
+  "migration",
   "sync",
   "README.md",
   "pyproject.toml",
