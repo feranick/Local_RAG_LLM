@@ -68,7 +68,7 @@ Usage:
   python3 sync_folder.py --status               # how far along? (safe during a run)
 """
 
-__version__ = "2026.08.01.10"
+__version__ = "2026.08.03.1"
 
 import os
 import re

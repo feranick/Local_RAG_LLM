@@ -1,0 +1,116 @@
+# pyproject.toml — build Local_RAG_LLM as a wheel.
+#
+# Repo layout is flat script folders (management/, sync/) with no __init__.py, so
+# nothing here asks you to move files: the wheel remaps those two directories
+# under a single import namespace.
+#
+#     management/manage_models.py  ->  local_rag_llm/management/manage_models.py
+#     sync/sync_folder.py          ->  local_rag_llm/sync/sync_folder.py
+#
+# That works without __init__.py because of PEP 420 implicit namespace packages.
+#
+# Build and install:
+#     python3 -m pip install --upgrade build
+#     python3 -m build --wheel            # -> dist/local_rag_llm-2026.8.3.1-py3-none-any.whl
+#     python3 -m pip install dist/*.whl
+#
+# After installing you get console commands (rag-sync, rag-models, …) on PATH,
+# plus the four shell scripts installed into the same bin/ directory.
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-rag-llm"
+# PEP 440 normalises "2026.08.03.1" to "2026.8.3.1" (leading zeros are dropped),
+# so the version is written in normalised form here to match the wheel filename.
+# The scripts themselves carry __version__ = "2026.08.03.1".
+version = "2026.8.3.1"
+description = "Local RAG stack for the NVIDIA DGX Spark: Ollama + Open WebUI, folder sync, model management and machine migration"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Nicola Ferralis", email = "ferralis@generalflash.com" }]
+keywords = ["rag", "ollama", "open-webui", "dgx-spark", "embeddings", "retrieval"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Text Processing :: Indexing",
+]
+
+# Every tool here talks to Open WebUI / Ollama over HTTP.
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+# --describe-figures renders PDF pages and images for the vision model
+figures = ["pymupdf>=1.23"]
+# everything optional, for a one-line full install
+all = ["pymupdf>=1.23"]
+
+[project.urls]
+Homepage = "https://github.com/feranick/Local_RAG_LLM"
+Repository = "https://github.com/feranick/Local_RAG_LLM"
+
+# Console entry points. Each target module already defines main() and keeps its
+# own argument parsing, so `rag-sync --status` behaves exactly like
+# `python3 sync/sync_folder.py --status`.
+[project.scripts]
+rag-sync           = "local_rag_llm.sync.sync_folder:main"
+rag-library-stats  = "local_rag_llm.sync.library_stats:main"
+rag-diag-duplicate = "local_rag_llm.sync.diag_duplicate:main"
+rag-models         = "local_rag_llm.management.manage_models:main"
+rag-new-instance   = "local_rag_llm.management.new_rag_instance:main"
+rag-migrate        = "local_rag_llm.management.migrate_rag:main"
+
+# ---------------------------------------------------------------------------
+# Wheel contents
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+# Only these two folders ship as importable code; proxify is a git submodule and
+# is deliberately left out of the wheel (it is a separate project).
+only-include = ["management", "sync"]
+# the .sh files are installed as executables below, so keep them out of the
+# importable package to avoid shipping each one twice
+exclude = ["**/*.sh"]
+
+[tool.hatch.build.targets.wheel.sources]
+"management" = "local_rag_llm/management"
+"sync" = "local_rag_llm/sync"
+
+# The shell scripts are not importable, so they land in the environment's bin/
+# directory instead of inside the package.
+#
+# NOTE: the installer preserves the file mode recorded in the wheel, and these
+# four are currently committed as 100644 (non-executable), so after installing
+# you'd have to call them as `bash setup_local_rag.sh`. Fix it once in git and
+# every future wheel carries the executable bit:
+#
+#     git update-index --chmod=+x management/*.sh
+#     git commit -m "mark shell scripts executable"
+#
+[tool.hatch.build.targets.wheel.shared-scripts]
+"management/setup_local_rag.sh" = "setup_local_rag.sh"
+"management/update_local_rag.sh" = "update_local_rag.sh"
+"management/uninstall_local_rag.sh" = "uninstall_local_rag.sh"
+"management/llm_stack_healthcheck.sh" = "llm_stack_healthcheck.sh"
+
+# ---------------------------------------------------------------------------
+# Source distribution (sdist)
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.sdist]
+include = [
+  "management",
+  "sync",
+  "README.md",
+  "pyproject.toml",
+]
+exclude = [
+  "**/__pycache__",
+  "**/*.pyc",
+  # never ship anyone's live configuration or credentials
+  "**/*.conf",
+  "**/.rag_sync_*",
+]

@@ -12,6 +12,8 @@ Usage:
     python3 diag_duplicate.py "/path/to/file.pdf" --keep     # don't delete the upload
 """
 
+__version__ = "2026.08.03.1"
+
 import os
 import sys
 import hashlib
@@ -19,11 +21,22 @@ import pathlib
 import requests
 
 BASE = os.environ.get("RAG_BASE_URL", "http://localhost:3000")
-TARGET = os.environ.get("RAG_TARGET", "c411c9dc-289a-4e4c-bfa9-c5fab84d22c6")
+TARGET = os.environ.get("RAG_TARGET", "")
 _KEY_FILE = pathlib.Path(os.environ.get(
     "RAG_KEY_FILE", str(pathlib.Path.home() / ".rag_sync_key"))).expanduser()
-KEY = os.environ.get("RAG_API_KEY") or _KEY_FILE.read_text().strip()
-H = {"Authorization": f"Bearer {KEY}"}
+
+
+def _read_key():
+    """The API key, with a readable error instead of a traceback when absent."""
+    key = os.environ.get("RAG_API_KEY", "")
+    if key:
+        return key
+    try:
+        return _KEY_FILE.read_text().strip()
+    except OSError:
+        sys.exit(f"no API key: set RAG_API_KEY, or put the sk-… key in {_KEY_FILE}\n"
+                 f"       (RAG_KEY_FILE overrides that path; use the same key file "
+                 f"as your sync config)")
 
 
 def norm(s):
@@ -31,16 +44,23 @@ def norm(s):
 
 
 def main():
+    if "--version" in sys.argv:
+        print(f"diag_duplicate.py {__version__}")
+        return
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     keep = "--keep" in sys.argv
     if not args:
-        sys.exit("give me the path of a file that was flagged as duplicate")
+        sys.exit("give me the path of a file that was flagged as duplicate\n"
+                 "       usage: diag_duplicate.py /path/to/file.pdf [--keep]\n"
+                 "       env:   RAG_BASE_URL, RAG_TARGET, RAG_KEY_FILE / RAG_API_KEY")
     p = pathlib.Path(args[0]).expanduser()
     if not p.is_file():
         sys.exit(f"not found: {p}")
+    if not TARGET:
+        sys.exit("set RAG_TARGET to the knowledge collection id you're diagnosing")
 
     s = requests.Session()
-    s.headers.update(H)
+    s.headers.update({"Authorization": f"Bearer {_read_key()}"})
 
     # ---- 1. snapshot what is stored now -------------------------------
     items = s.get(f"{BASE}/api/v1/files/", timeout=60).json()["items"]
