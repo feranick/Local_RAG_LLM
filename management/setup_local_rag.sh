@@ -120,13 +120,14 @@ find_probe() {
            "$here/../management/platform_probe.py"; do
     [ -f "$p" ] && { echo "$p"; return 0; }
   done
-  command -v rag-probe >/dev/null 2>&1 && { echo "rag-probe"; return 0; }
+  # installed as a wheel: the command is named after the script
+  command -v platform_probe >/dev/null 2>&1 && { echo "platform_probe"; return 0; }
   return 1
 }
 PROBE="$(find_probe || true)"
 if [ -n "$PROBE" ] && command -v python3 >/dev/null 2>&1; then
-  if [ "$PROBE" = "rag-probe" ]; then
-    eval "$(rag-probe --shell 2>/dev/null || true)"
+  if [ "$PROBE" = "platform_probe" ]; then
+    eval "$(platform_probe --shell 2>/dev/null || true)"
   else
     eval "$(python3 "$PROBE" --shell 2>/dev/null || true)"
   fi

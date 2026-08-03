@@ -53,6 +53,47 @@ python3 common/platform_probe.py --write    # save it as hardware.conf
 
 The budget it derives — VRAM for a discrete GPU, ~85% of RAM for unified memory, ~60% for CPU-only — is what `setup_local_rag.sh` and `manage_models.py` use to decide which models to offer. Hand-edits to `hardware.conf` win over detection, and `RAG_USABLE_MEM_GB` overrides both.
 
+### Optional: install as a package
+
+Running the scripts straight from the checkout is fully supported and needs nothing
+but `requests`. If you'd rather have them on `PATH`:
+
+```bash
+python3 -m pip install --upgrade build
+python3 -m build --wheel
+python3 -m pip install dist/*.whl
+```
+
+**Every command keeps its script's name** — no prefixes, nothing to translate:
+
+| run from the checkout | installed command |
+|---|---|
+| `python3 common/platform_probe.py` | `platform_probe` |
+| `python3 sync/sync_folder.py` | `sync_folder` |
+| `python3 sync/library_stats.py` | `library_stats` |
+| `python3 sync/diag_duplicate.py` | `diag_duplicate` |
+| `python3 management/manage_models.py` | `manage_models` |
+| `python3 management/new_rag_instance.py` | `new_rag_instance` |
+| `python3 migration/migrate_rag.py` | `migrate_rag` |
+
+The four shell scripts install under their own names too (`setup_local_rag.sh`,
+`update_local_rag.sh`, `uninstall_local_rag.sh`, `llm_stack_healthcheck.sh`), so
+every command in this documentation works either way — drop the `python3 <dir>/`
+prefix and the `.py`. `pyproject.toml` also carries a commented block of
+`rag-`-prefixed aliases if you'd rather namespace them in a shared `/usr/local/bin`.
+
+For a system-wide install without touching the distro's Python:
+
+```bash
+sudo python3 -m venv /opt/local-rag-llm
+sudo /opt/local-rag-llm/bin/pip install dist/*.whl
+sudo ln -sf /opt/local-rag-llm/bin/* /usr/local/bin/
+```
+
+Don't run the Python tools under `sudo`: they resolve `~/.rag_sync_key` and the state
+files from `$HOME`, which becomes `/root`. The shell installers *do* expect sudo and
+already target your real home.
+
 ---
 
 ## Quick start

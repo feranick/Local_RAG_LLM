@@ -16,8 +16,9 @@
 #     python3 -m build --wheel            # -> dist/local_rag_llm-2026.8.3.2-py3-none-any.whl
 #     python3 -m pip install dist/*.whl
 #
-# After installing you get console commands (rag-sync, rag-models, …) on PATH,
-# plus the four shell scripts installed into the same bin/ directory.
+# After installing, each script is on PATH under its own name (sync_folder,
+# manage_models, platform_probe, …), and the four shell scripts land in the
+# same bin/ directory as themselves (setup_local_rag.sh, …).
 
 [build-system]
 requires = ["hatchling>=1.21"]
@@ -56,17 +57,43 @@ all = ["pymupdf>=1.23"]
 Homepage = "https://github.com/feranick/Local_RAG_LLM"
 Repository = "https://github.com/feranick/Local_RAG_LLM"
 
-# Console entry points. Each target module already defines main() and keeps its
-# own argument parsing, so `rag-sync --status` behaves exactly like
-# `python3 sync/sync_folder.py --status`.
+# Console entry points.
+#
+# NAMING: each command is named EXACTLY after its script, minus the .py. So the
+# documentation, the repo and the installed command all use one name — nothing to
+# map in your head, and it matches the shell scripts, which install under their own
+# filenames too (setup_local_rag.sh, update_local_rag.sh, ...).
+#
+#     common/platform_probe.py       -> platform_probe
+#     sync/sync_folder.py            -> sync_folder
+#     sync/library_stats.py          -> library_stats
+#     sync/diag_duplicate.py         -> diag_duplicate
+#     management/manage_models.py    -> manage_models
+#     management/new_rag_instance.py -> new_rag_instance
+#     migration/migrate_rag.py       -> migrate_rag
+#
+# Every target defines main() and does its own argument parsing, so
+# `sync_folder --status` behaves exactly like `python3 sync/sync_folder.py --status`.
 [project.scripts]
-rag-probe          = "local_rag_llm.common.platform_probe:main"
-rag-sync           = "local_rag_llm.sync.sync_folder:main"
-rag-library-stats  = "local_rag_llm.sync.library_stats:main"
-rag-diag-duplicate = "local_rag_llm.sync.diag_duplicate:main"
-rag-models         = "local_rag_llm.management.manage_models:main"
-rag-new-instance   = "local_rag_llm.management.new_rag_instance:main"
-rag-migrate        = "local_rag_llm.migration.migrate_rag:main"
+platform_probe   = "local_rag_llm.common.platform_probe:main"
+sync_folder      = "local_rag_llm.sync.sync_folder:main"
+library_stats    = "local_rag_llm.sync.library_stats:main"
+diag_duplicate   = "local_rag_llm.sync.diag_duplicate:main"
+manage_models    = "local_rag_llm.management.manage_models:main"
+new_rag_instance = "local_rag_llm.management.new_rag_instance:main"
+migrate_rag      = "local_rag_llm.migration.migrate_rag:main"
+
+# Prefer namespaced commands in a shared bin/ (e.g. /usr/local/bin, where
+# `library_stats` is a fairly generic name to claim)? Uncomment these — entry
+# points are just aliases, so both sets can coexist:
+#
+# rag-platform-probe   = "local_rag_llm.common.platform_probe:main"
+# rag-sync-folder      = "local_rag_llm.sync.sync_folder:main"
+# rag-library-stats    = "local_rag_llm.sync.library_stats:main"
+# rag-diag-duplicate   = "local_rag_llm.sync.diag_duplicate:main"
+# rag-manage-models    = "local_rag_llm.management.manage_models:main"
+# rag-new-rag-instance = "local_rag_llm.management.new_rag_instance:main"
+# rag-migrate-rag      = "local_rag_llm.migration.migrate_rag:main"
 
 # ---------------------------------------------------------------------------
 # Wheel contents
