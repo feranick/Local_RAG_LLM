@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.08.03.2**
+**Version 2026.08.03.3**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -376,6 +376,35 @@ Two alternatives, both narrower:
   unusable for a library of thousands.
 - **System prompt** instructing the model to call `query_knowledge_files` first. Helps
   a bit, but you're still relying on the tool use that failed.
+
+### A configuration that works for a shared assistant
+
+Reached after a lot of trial and error on v0.11.0, and worth copying wholesale if
+you want a lab assistant that answers reliably without anyone typing `#`:
+
+| Setting | Value | Why |
+|---|---|---|
+| Knowledge attached to the preset | the big library **and** a small notes collection | so neither has to be added per chat |
+| **Function Calling** | **`Legacy`** | attached collections are then retrieved server-side and injected. Under `Native` they're exposed as *tools* and only reach the model if it chooses to search them — which is why an attached collection can look completely ignored |
+| Top K | `10–15` | the default `3` is too tight once a library is large |
+| Hybrid Search | **off** (unless the reranker is verified) | enabling it with a missing/misconfigured reranker made retrieval *worse* here |
+| System prompt | a precedence line naming the notes collection | e.g. "LabNotes describes local practice and takes precedence over vendor documentation" |
+| Prompt suggestions | a few real questions | replaces the generic "Tell me a fun fact" cards |
+
+`Legacy` is deprecated upstream, and their advice is a stronger tool-calling model
+instead. That's fair for chat quality, but it doesn't address this case: the issue
+isn't the model's intelligence, it's that **`Native` never injects attached
+knowledge at all**. Until that changes, `Legacy` is the setting that makes an
+attached collection behave the way the UI implies it should.
+
+Two navigation traps in the Workspace UI, both of which cost time here:
+
+- **Clicking a preset's title opens a chat with it**, not the editor. The editor is
+  the row's **pencil** (hidden on narrow windows) or, reliably, the direct URL:
+  `http://<host>:<port>/workspace/models/edit?id=<preset-id>`
+- The **Knowledge** attachment row lives *inside that editor*, below Advanced Params
+  and Prompt Suggestions — not on the Workspace → **Knowledge** tab, which is only
+  the library of collections.
 
 ### Which models cope with agentic retrieval
 

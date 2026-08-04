@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.03.2**
+**Version 2026.08.03.3**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -783,6 +783,39 @@ a first-line heading carrying the key terms. And if the file is guidance that sh
 *override* the general documentation, don't leave it to retrieval at all — put it in
 its own small knowledge base attached in **Full Context** mode, which is injected
 verbatim every message.
+
+### Writing notes that retrieval can actually find
+
+For short operational notes — where things are kept, which trick works on which
+instrument — the wording decides whether they surface. Short notes have an
+advantage worth exploiting: a 30-word note containing "sample cabinet" *is* about
+sample cabinets as far as the embedding is concerned, while the same phrase buried
+in a 40-page thesis barely shifts that document's vector. BM25 (hybrid search)
+rewards the literal term as well.
+
+So write them in the **asker's** vocabulary, not your own, and name each thing every
+way people say it:
+
+```markdown
+# Sample storage — sample cabinet
+
+Coffee bean samples are in the **sample cabinet**, second shelf, labelled by roast date.
+Also called: bean cabinet, storage cabinet, sample cupboard, the grey cabinet by the fume hood.
+Ask Nicola if a sample isn't there.
+```
+
+- **One topic per file**, named for the topic (`sample_storage.md`, `aeris_xrd_tricks.md`).
+- **An "also called" line** costs nothing and catches phrasing you didn't anticipate.
+  For instruments, list every alias: `AERIS`, `Panalytical AERIS`, `the XRD`,
+  `powder diffractometer`.
+- **State the fact with its location in the same sentence.** "Coffee beans: sample
+  cabinet, second shelf" beats "the beans are stored as usual".
+- **Say who to ask** when the note doesn't cover it — often the answer people
+  actually need.
+
+This is advice for *retrieval*. Notes pinned into a preset's system prompt (see
+`pin_notes.py`) are present regardless, though plain phrasing still helps the model
+notice that the note answers the question.
 
 **"The answer is definitely in the library, but the model says it isn't."**
 Check *how* the question was asked before suspecting the index. Without `#` (or a
