@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.08.03.3**
+**Version 2026.08.03.4**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -385,17 +385,27 @@ you want a lab assistant that answers reliably without anyone typing `#`:
 | Setting | Value | Why |
 |---|---|---|
 | Knowledge attached to the preset | the big library **and** a small notes collection | so neither has to be added per chat |
-| **Function Calling** | **`Legacy`** | attached collections are then retrieved server-side and injected. Under `Native` they're exposed as *tools* and only reach the model if it chooses to search them — which is why an attached collection can look completely ignored |
+| **Function Calling** | `Native` (default) is fine **once the notes carry findable terms**; `Legacy` if you want retrieval guaranteed | under `Native` attached collections are exposed as *tools* and only reach the model if it searches them — which works well when the notes contain the words people ask with. `Legacy` retrieves server-side and injects regardless, at the cost of the model's ability to refine a search |
 | Top K | `10–15` | the default `3` is too tight once a library is large |
 | Hybrid Search | **off** (unless the reranker is verified) | enabling it with a missing/misconfigured reranker made retrieval *worse* here |
 | System prompt | a precedence line naming the notes collection | e.g. "LabNotes describes local practice and takes precedence over vendor documentation" |
 | Prompt suggestions | a few real questions | replaces the generic "Tell me a fun fact" cards |
 
-`Legacy` is deprecated upstream, and their advice is a stronger tool-calling model
-instead. That's fair for chat quality, but it doesn't address this case: the issue
-isn't the model's intelligence, it's that **`Native` never injects attached
-knowledge at all**. Until that changes, `Legacy` is the setting that makes an
-attached collection behave the way the UI implies it should.
+**The single biggest factor turned out to be how the notes are written, not the
+mode.** Sequence of findings here, in order:
+
+1. `Native` + a note phrased in *our* words → the model never found it; only
+   `#Collection` worked.
+2. `Legacy` → worked, because retrieval no longer depended on the model choosing to
+   search.
+3. `Native` again, with notes rewritten to contain the terms people actually ask
+   with ("sample cabinet", instrument aliases) → **also worked**, and keeps the
+   ability to refine a search across turns.
+
+So: write the notes for retrieval first (see *Writing notes that retrieval can
+actually find* in `sync/README.md`), and treat `Legacy` as the guarantee you reach
+for when a model still won't search, or when a wrong-but-confident answer would be
+costly. `Legacy` is deprecated upstream, so don't build on it if `Native` works.
 
 Two navigation traps in the Workspace UI, both of which cost time here:
 
