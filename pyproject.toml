@@ -72,6 +72,7 @@ Repository = "https://github.com/feranick/Local_RAG_LLM"
 #     management/new_rag_instance.py -> new_rag_instance
 #     migration/migrate_rag.py       -> migrate_rag
 #     management/pin_notes.py        -> pin_notes
+#     management/determinism_check.py -> determinism_check
 #
 # Every target defines main() and does its own argument parsing, so
 # `sync_folder --status` behaves exactly like `python3 sync/sync_folder.py --status`.
@@ -84,6 +85,7 @@ manage_models    = "local_rag_llm.management.manage_models:main"
 new_rag_instance = "local_rag_llm.management.new_rag_instance:main"
 migrate_rag      = "local_rag_llm.migration.migrate_rag:main"
 pin_notes        = "local_rag_llm.management.pin_notes:main"
+determinism_check = "local_rag_llm.management.determinism_check:main"
 
 # Prefer namespaced commands in a shared bin/ (e.g. /usr/local/bin, where
 # `library_stats` is a fairly generic name to claim)? Uncomment these — entry
@@ -97,6 +99,7 @@ pin_notes        = "local_rag_llm.management.pin_notes:main"
 # rag-new-rag-instance = "local_rag_llm.management.new_rag_instance:main"
 # rag-migrate-rag      = "local_rag_llm.migration.migrate_rag:main"
 # rag-pin-notes        = "local_rag_llm.management.pin_notes:main"
+# rag-determinism-check = "local_rag_llm.management.determinism_check:main"
 
 # ---------------------------------------------------------------------------
 # Wheel contents

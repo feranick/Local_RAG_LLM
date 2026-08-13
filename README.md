@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.08.03.4**
+**Version 2026.08.03.6**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -30,6 +30,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 | `migrate_rag.py` | Move the whole stack to another machine: archives the docker volumes (collections **and** vectors), documents and sync files, then restores them and rewrites the absolute paths so nothing gets re-indexed or duplicated. See `MIGRATION_RUNBOOK.md`. |
 | `pin_notes.py` | Mirrors a folder of short notes into a model preset's **system prompt**, so local practice applies in every chat without depending on retrieval. Replaces only its own marked block, so hand-written prompt text survives; `--dry-run` shows a diff, `--clear` removes it. |
+| `determinism_check.py` | Asks the same question N times through the API and reports how much the answer moves — text, cited sources and the numbers in it. `--compare` runs the set twice, as configured and with sampling pinned, so you can see whether a settings change actually bought repeatability. Writes a keepable artifact folder. |
 | `manage_models.py` | Browse, add, test, list, remove or set the default **LLM** on a running stack. `--browse`/`--tags` read the available models live from the Ollama library; every add is followed by a real load test, since a model can download and still fail to run on this Ollama build. |
 | `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
 | `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in [`sync/README.md`](sync/README.md).** |
@@ -389,6 +390,8 @@ you want a lab assistant that answers reliably without anyone typing `#`:
 | Top K | `10–15` | the default `3` is too tight once a library is large |
 | Hybrid Search | **off** (unless the reranker is verified) | enabling it with a missing/misconfigured reranker made retrieval *worse* here |
 | System prompt | a precedence line naming the notes collection | e.g. "LabNotes describes local practice and takes precedence over vendor documentation" |
+| Advanced Params → `num_ctx` | `32768` (explicit) | left at `Default`, Ollama picks by memory tier — up to 256k, preallocated at load (see *Generation parameters* below) |
+| Advanced Params → `temperature` | `0.3` reasoning / `0.2` dense | the unset default is `0.8`, loose for factual answers |
 | Prompt suggestions | a few real questions | replaces the generic "Tell me a fun fact" cards |
 
 **The single biggest factor turned out to be how the notes are written, not the
@@ -519,6 +522,143 @@ only the latest one.
 - A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in `sync/README.md`).
 - Before blaming retrieval, re-ask the same question with `#` + the collection. If that works, the index is fine and the difference was tool use.
 - The agentic tool set is worth knowing even so: `query_knowledge_files` is semantic, `grep_knowledge_files` does exact string/regex matching, and `view_file` reads a line range. Capable models chain them; a system prompt naming which to prefer per collection helps.
+
+### Generation parameters — what is actually in effect
+
+Neither the context window nor the temperature is "the model's spec value". **Open WebUI
+sends only the parameters you explicitly set**; every field left at `Default` in Advanced
+Params is omitted from the request, and Ollama's own default applies instead. So a model
+advertising 256K context and a chat running at 256K context are two different claims.
+
+**Context window.** Ollama no longer uses one flat default — it picks a tier from the GPU
+memory it can see, then clamps to the maximum the model architecture supports:
+
+| GPU memory Ollama sees | default context |
+|---|---|
+| < 24 GiB | 4k |
+| 24–48 GiB | 32k |
+| ≥ 48 GiB | 256k |
+
+On unified-memory hardware (GB10 and similar) the whole pool reports as GPU memory, so you
+land in the top tier by default. That is not automatically good: the KV cache is allocated
+**when the model loads**, so a 256K window on a 35B model reserves tens of GB before the
+first question — on memory shared with the embedding model and every Open WebUI container.
+The clamp is visible in practice: `bge-m3` reports `8192`, its architectural maximum,
+however high the tier default goes.
+
+**Temperature.** Ollama's default is **0.8**, unless the model ships its own value in its
+Modelfile. 0.8 is loose for a documentation assistant — it is where a half-remembered
+detail comes out fluent and wrong. Lower it, but not to the floor: reasoning models
+(`qwen3.6`, thinking-enabled variants) tend to fall into repetition loops at very low
+temperature, so **0.3–0.6** is the useful band there, and **0.2** for non-reasoning models.
+
+**Check what is running, don't infer it.** With the model loaded:
+
+```bash
+ollama ps                              # CONTEXT column = what was actually allocated
+ollama show --parameters qwen3.6:35b   # parameters baked into the model itself, if any
+```
+
+```
+NAME             ID              SIZE      PROCESSOR    CONTEXT    UNTIL
+gemma4:31b       c6eb396dbd59    9.6 GB    100% GPU     131072     2 minutes from now
+```
+
+`PROCESSOR` is worth a glance in the same output: anything less than `100% GPU` means the
+context you asked for pushed part of the model to CPU, which costs far more speed than the
+larger window buys.
+
+**Where to set each.** Precedence is *request → model Modelfile → server default*:
+
+| Scope | Where | Notes |
+|---|---|---|
+| One preset (recommended) | Workspace → Models → *preset* → **Advanced Params** → `num_ctx (Ollama)`, `temperature` | sent per request, overrides everything below; base models keep their defaults |
+| One chat | Chat Controls → Advanced Params | same mechanism, temporary |
+| Server-wide | `sudo systemctl edit ollama` → `Environment="OLLAMA_CONTEXT_LENGTH=32768"`, then `sudo systemctl restart ollama` | applies to anything that doesn't ask for a size |
+
+Pin the preset to **32k or 64k** rather than leaving it at the 256k tier default. Retrieval
+quality does not suffer: how much of the library reaches the model is set by **Top K and
+chunk size**, not by window size. A large window only matters for long conversations and
+pasted documents — and in exchange you get predictable memory instead of a load-time
+surprise when two instances warm up at once. Above ~64k is worth it only if you routinely
+paste whole manuals into a chat.
+
+Reference: [Ollama — context length](https://docs.ollama.com/context-length),
+[Ollama — Modelfile parameters](https://docs.ollama.com/modelfile).
+
+### "The same question gives a different answer" — measuring it
+
+Some variation is unavoidable, but most of what people notice is fixable, and the
+fixes are in different places than you'd guess. Ranked by how much they move an
+answer in a RAG chat:
+
+1. **Sampling.** Temperature `0.8` unset, and even a deliberate `0.6` re-rolls the
+   wording every time. `temperature 0` is greedy decoding — same logits, same token.
+2. **Retrieval that isn't the same twice.** Under `Native` tool calling the model
+   *decides* which searches to run, and that decision is itself sampled: different
+   queries → different chunks → a different answer built on different evidence. This
+   is why a RAG chat feels less repeatable than plain chat, and why pinning
+   temperature sometimes fixes more than you expected — it stabilises the tool calls
+   too.
+3. **Prompt drift.** Conversation history, or an index that changed between the two
+   asks (a sync landed in between).
+4. **Kernels and batching.** Floating-point addition isn't associative, and batch
+   composition shifts when two people query at once. Real, but the smallest term —
+   and not controllable through Ollama's API.
+
+Point 4 is what dedicated tooling like [detLLM](https://github.com/tommasocerruti/detllm)
+measures: it loads a model in-process (HuggingFace/vLLM), controls seeds and kernel
+flags, and reports run-to-run and batch-size variance with a repro pack. Worth
+knowing about, but it can't attach to a model served by Ollama over HTTP, and it
+measures the last item on that list rather than the first three.
+
+`determinism_check.py` takes the useful part of that idea — repeat, compare, keep
+artifacts — and points it at the whole pipeline instead:
+
+```bash
+# is 0.6 costing you consistency? two passes over the same questions
+python3 management/determinism_check.py --model qwen3635b-breakerspace \
+    --question "Where are the polished cross-section samples stored?" \
+    --expect "sample cabinet" --runs 5 --compare
+
+# a standing question set, run before and after any config change
+python3 management/determinism_check.py --model qwen3635b-breakerspace \
+    --questions lab_questions.txt --runs 5 --fail-under 0.8
+```
+
+Question-set file — one per line, `#` for comments, optional expected-answer regex:
+
+```
+Where are the polished cross-section samples stored?  || sample cabinet
+What is the EDS working distance on the Phenom?       || \b10(\.0)?\s*mm
+```
+
+Each question gets a category, not just a percentage:
+
+| Category | Meaning | What to do |
+|---|---|---|
+| `identical` | same text every run | nothing |
+| `wording-only` | phrasing differs, numbers and citations agree | usually fine — this is what "good" looks like at temperature > 0 |
+| `sources-differ` | same facts, different documents cited | retrieval is wobbling: fix Top K, hybrid search, or the model's search behaviour |
+| `facts-differ` | the numbers in the answer changed | the dangerous one — treat as a retrieval or model-capability problem |
+| `answer-flips` | the `--expect` regex matched only some runs | the note isn't reliably findable (see *Writing notes that retrieval can actually find*) |
+
+`--compare` prints a before/after table and, when pinning the sampling parameters
+*doesn't* help, says so explicitly — that result points at retrieval rather than the
+decoder, and the next things to try are `Function Calling = Legacy`, a fixed Top K
+and hybrid search off.
+
+Artifacts land in `determinism_<timestamp>/`: `runs.jsonl` (every raw response),
+`report.json`, `report.txt`. They record the Open WebUI and Ollama versions and each
+loaded model's actual `context_length`, which is what makes a run from today
+comparable with one from before a settings change. `--fail-under 0.8` exits non-zero,
+so the check can gate a change rather than just describe it.
+
+Two notes for the first real run: each repetition is a **new single-message chat**, so
+the numbers are a floor — a long conversation will be less repeatable, not more. And
+if `sources` comes back empty while the UI cites documents for the same question, this
+build doesn't apply the preset's attached knowledge on the API path; pass
+`--collection <id>` explicitly.
 
 ---
 
