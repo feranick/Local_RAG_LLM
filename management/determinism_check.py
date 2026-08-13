@@ -338,7 +338,11 @@ def analyze(question, expect, runs):
     src_sets = collections.Counter(tuple(r["sources"]) for r in good)
     out["distinct_source_sets"] = len(src_sets)
     out["modal_sources"] = list(src_sets.most_common(1)[0][0])
-    out["source_consistency"] = round(src_sets.most_common(1)[0][1] / len(good), 3)
+    # Every run citing NOTHING is not agreement — it means no document ever reached
+    # the model, and the whole measurement is of the bare model, not of your RAG.
+    out["retrieved"] = any(r["sources"] for r in good)
+    out["source_consistency"] = (round(src_sets.most_common(1)[0][1] / len(good), 3)
+                                 if out["retrieved"] else None)
 
     num_sets = collections.Counter(tuple(r["numbers"]) for r in good)
     out["distinct_number_sets"] = len(num_sets)
@@ -350,11 +354,17 @@ def analyze(question, expect, runs):
         out["expect_hit_rate"] = round(hits / len(good), 3)
 
     out["seconds_median"] = round(statistics.median(r["seconds"] for r in good), 1)
-    out["chars_median"] = int(statistics.median(len(r["text"]) for r in good))
+    lens = [len(r["text"]) for r in good]
+    out["chars_median"] = int(statistics.median(lens))
+    out["chars_min"], out["chars_max"] = min(lens), max(lens)
 
-    # category, in the order that matters to someone reading the report
-    if expect and out.get("expect_hit_rate", 1.0) < 1.0:
-        out["category"] = "answer-flips"      # worst: sometimes right, sometimes not
+    # category, in the order that matters to someone reading the report. "no
+    # retrieval at all" comes first: nothing below it can be interpreted until the
+    # documents are actually reaching the model.
+    if not out["retrieved"]:
+        out["category"] = "no-retrieval"
+    elif expect and out.get("expect_hit_rate", 1.0) < 1.0:
+        out["category"] = "answer-flips"      # sometimes right, sometimes not
     elif not out["numbers_agree"]:
         out["category"] = "facts-differ"
     elif out["source_consistency"] < 1.0:
@@ -378,8 +388,27 @@ VERDICT = {
     "sources-differ": (Y, "same facts, different documents cited"),
     "facts-differ": (R, "the numbers in the answer changed between runs"),
     "answer-flips": (R, "the expected answer appeared only some of the time"),
+    "no-retrieval": (R, "NO documents were retrieved — this measured the bare model"),
     "no-answer":    (R, "every run failed"),
 }
+
+NO_RETRIEVAL_HELP = [
+    "No run cited a source, so the collection never reached the model. Nothing else",
+    "in this report describes your RAG setup until that is fixed. Either:",
+    "  * attach the collection explicitly:  --collection <collection id>",
+    "    (it is the TARGET value in your sync .conf)",
+    "  * or the build does not apply a preset's attached Knowledge on the API path,",
+    "    which is a real difference from the UI and worth knowing either way.",
+]
+
+PARAMS_IGNORED_HELP = [
+    "Pinning temperature/top_k changed nothing, and answer LENGTH still varies",
+    "widely — that is not what greedy decoding looks like. The likely cause is that",
+    "the preset's Advanced Params are applied over the values sent in the request.",
+    "Test it: re-run against the BASE model id (no preset) with --temperature 0.",
+    "  * base model becomes repeatable  -> set parameters on the PRESET, in the UI",
+    "  * base model still varies        -> the parameters are not reaching Ollama",
+]
 
 
 # ------------------------------------------------------------------- execution
@@ -453,8 +482,9 @@ def render(report):
             if "expect_hit_rate" in r:
                 exp = "{:>7.0%}".format(r["expect_hit_rate"])
             nums = "same" if r.get("numbers_agree") else "DIFFER"
-            A(f"{r.get('consistency', 0):>11.0%}  "
-              f"{r.get('source_consistency', 0):>7.0%}  "
+            sc = r.get("source_consistency")
+            srcs = "{:>7.0%}".format(sc) if sc is not None else "   NONE"
+            A(f"{r.get('consistency', 0):>11.0%}  {srcs}  "
               f"{nums:>8}  {exp}  "
               f"{r['category']:<14} {r['question'][:48]}")
             fd = r.get("first_divergence")
@@ -476,13 +506,32 @@ def render(report):
         A(f"mean consistency: {a['label']} {mean_a:.0%}  →  {b['label']} {mean_b:.0%}")
         if mean_b <= mean_a + 0.01:
             A("Pinning the sampling parameters did NOT improve repeatability here.")
-            A("That points at retrieval, not the decoder: under Native tool calling the")
-            A("model chooses what to search. Try Function Calling = Legacy, a fixed Top K,")
-            A("and hybrid search off, then re-run.")
+            # Distinguish the two very different reasons for that. If the answers are
+            # still wildly different LENGTHS at temperature 0, the parameters almost
+            # certainly never took effect; blaming retrieval would send you to the
+            # wrong knob entirely.
+            wobbly = [r for r in b["results"]
+                      if r.get("chars_max", 0) - r.get("chars_min", 0)
+                      > 0.25 * max(1, r.get("chars_median", 1))]
+            if wobbly:
+                A("")
+                for line in PARAMS_IGNORED_HELP:
+                    A(line)
+            else:
+                A("Answer length is stable, so the parameters did take effect and the")
+                A("variance is upstream — under Native tool calling the model chooses")
+                A("what to search. Try Function Calling = Legacy, a fixed Top K, and")
+                A("hybrid search off, then re-run.")
+        A("")
+    if any(r.get("category") == "no-retrieval"
+           for p in report["passes"] for r in p["results"]):
+        A("!! NO RETRIEVAL")
+        for line in NO_RETRIEVAL_HELP:
+            A(line)
         A("")
     A("Categories: identical | wording-only (facts agree) | sources-differ |")
     A("            facts-differ (numbers moved) | answer-flips (expected answer missing")
-    A("            in some runs) | no-answer")
+    A("            in some runs) | no-retrieval (nothing was cited) | no-answer")
     return "\n".join(L)
 
 

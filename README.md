@@ -572,9 +572,25 @@ larger window buys.
 
 | Scope | Where | Notes |
 |---|---|---|
-| One preset (recommended) | Workspace → Models → *preset* → **Advanced Params** → `num_ctx (Ollama)`, `temperature` | sent per request, overrides everything below; base models keep their defaults |
+| One preset (recommended) | Workspace → Models → *preset* → **Advanced Params** → `num_ctx (Ollama)`, `temperature` | the authoritative place; base models keep their defaults |
 | One chat | Chat Controls → Advanced Params | same mechanism, temporary |
-| Server-wide | `sudo systemctl edit ollama` → `Environment="OLLAMA_CONTEXT_LENGTH=32768"`, then `sudo systemctl restart ollama` | applies to anything that doesn't ask for a size |
+| Server-wide | `sudo systemctl edit ollama` → `Environment="OLLAMA_CONTEXT_LENGTH=32768"`, then `sudo systemctl restart ollama` | context only — there is **no** `OLLAMA_TEMPERATURE`; sampling parameters are per-request by nature |
+
+There is no server-wide temperature setting. If you want a default that survives
+regardless of client, bake it into a derived model instead — this costs almost no
+disk, since the weights are content-addressed blobs that the copy reuses:
+
+```bash
+ollama show --modelfile qwen3.6:35b > /tmp/Modelfile   # add: PARAMETER temperature 0.3
+ollama create qwen3.6-35b-lab -f /tmp/Modelfile
+ollama show --parameters qwen3.6-35b-lab               # verify
+```
+
+**Observed on 0.11.0:** sampling parameters sent in an **API request** did *not*
+override a preset's Advanced Params — the same question at `temperature 0` over the
+API still produced five different answers of very different lengths. Treat the preset
+as the authority and set parameters there, in the UI. (`determinism_check.py --compare`
+detects this case and says so, rather than blaming retrieval.)
 
 Pin the preset to **32k or 64k** rather than leaving it at the 256k tier default. Retrieval
 quality does not suffer: how much of the library reaches the model is set by **Top K and
@@ -637,6 +653,7 @@ Each question gets a category, not just a percentage:
 
 | Category | Meaning | What to do |
 |---|---|---|
+| `no-retrieval` | **no run cited anything** — the collection never reached the model | stop reading the rest of the report; pass `--collection <id>` (the `TARGET` in your sync `.conf`) |
 | `identical` | same text every run | nothing |
 | `wording-only` | phrasing differs, numbers and citations agree | usually fine — this is what "good" looks like at temperature > 0 |
 | `sources-differ` | same facts, different documents cited | retrieval is wobbling: fix Top K, hybrid search, or the model's search behaviour |
