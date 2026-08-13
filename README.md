@@ -660,6 +660,22 @@ if `sources` comes back empty while the UI cites documents for the same question
 build doesn't apply the preset's attached knowledge on the API path; pass
 `--collection <id>` explicitly.
 
+**Point it at the right instance.** Presets belong to *one* container: a preset created
+on the second library is invisible on `:3000`, and each instance has its own API key
+file. The tool checks the model exists before running anything, but if a request fails
+for another reason, `--probe` reports every candidate endpoint separately:
+
+```bash
+determinism_check --instance http://localhost:3002 \
+    --key-file ~/.rag_sync_key_open-webui-breakerspace \
+    --model qwen3635b-breakerspace --probe
+```
+
+One quirk worth recognising anywhere you script against Open WebUI: its SPA catch-all
+is registered **GET-only**, so a POST to a path this build doesn't serve returns
+`405 Method Not Allowed` — not `404`. A 405 therefore means "no such route here" and
+says nothing about your key or your model.
+
 ---
 
 ## Keeping the knowledge base updated (folder sync)

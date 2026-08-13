@@ -51,7 +51,7 @@ Caveats, stated plainly:
     collection explicitly with --collection <id>.
 """
 
-__version__ = "2026.08.03.2"
+__version__ = "2026.08.13.1"
 
 import os
 import re
@@ -138,6 +138,28 @@ def cmd_list(session, base):
         print(f"  {kind}  {str(m.get('id'))[:40]:42} {m.get('name')}")
 
 
+def preflight_model(session, base, model):
+    """Fail before running N generations if the model isn't on this instance.
+
+    Presets are per-instance: one created on the second library's container is not
+    visible on the first, and each instance has its own API key. That mistake
+    otherwise surfaces as an opaque HTTP error inside the run loop."""
+    models = list_presets(session, base)
+    ids = [m.get("id") for m in models if isinstance(m, dict) and m.get("id")]
+    if model in ids:
+        return
+    near = [i for i in ids if model.lower() in i.lower() or i.lower() in model.lower()]
+    bad(f"model '{model}' is not on {base}")
+    if near:
+        info("close matches here: " + ", ".join(near))
+    else:
+        info("available here: " + (", ".join(ids[:12]) or "none"))
+    info("Presets belong to ONE instance. If this preset was created on the second")
+    info("library's container, point --instance at that port and use its key file:")
+    info("  --instance http://localhost:3002 --key-file ~/.rag_sync_key_open-webui-<name>")
+    sys.exit(1)
+
+
 def environment(session, base):
     """Best-effort provenance for the artifact — the thing that makes a result from
     last month comparable with one from today."""
@@ -164,18 +186,35 @@ def environment(session, base):
     return env
 
 
-def ask(session, base, model, question, params, collection, timeout, path_cache):
-    """One single-message chat. Returns (text, sources, raw, seconds, error)."""
+# Documented endpoint first. The others are here only so a build that moved it can
+# still be found — and note that POSTing to a path Open WebUI does NOT serve returns
+# "405 Method Not Allowed", not 404, because the SPA catch-all is registered GET-only.
+# So a 405 means "no such route on this build", and is not worth reporting as the
+# reason a working route failed.
+CHAT_PATHS = ["/api/chat/completions",
+              "/api/v1/chat/completions",
+              "/v1/chat/completions",
+              "/openai/chat/completions"]
+
+
+def chat_body(model, question, params, collection):
     body = {"model": model,
             "messages": [{"role": "user", "content": question}],
             "stream": False}
     body.update(params)
     if collection:
         body["files"] = [{"type": "collection", "id": collection}]
+    return body
 
-    paths = [path_cache[0]] if path_cache[0] else ["/api/chat/completions",
-                                                   "/v1/chat/completions"]
-    last = None
+
+def ask(session, base, model, question, params, collection, timeout, path_cache):
+    """One single-message chat. Returns (text, sources, raw, seconds, error).
+
+    On failure the error names EVERY path tried and what each said — reporting only
+    the last attempt hides the real cause behind the fallback's 405."""
+    body = chat_body(model, question, params, collection)
+    paths = [path_cache[0]] if path_cache[0] else CHAT_PATHS
+    attempts = []
     for p in paths:
         t0 = time.time()
         d = api(session, "POST", f"{base}{p}", timeout=timeout, json=body)
@@ -186,8 +225,42 @@ def ask(session, base, model, question, params, collection, timeout, path_cache)
             text = msg.get("content") or ""
             sources = d.get("sources") or msg.get("sources") or []
             return text, source_names(sources), d, dt, None
-        last = d.get("__error__") if isinstance(d, dict) else "unknown error"
-    return "", [], None, 0.0, last
+        attempts.append((p, d.get("__error__") if isinstance(d, dict) else "unknown error"))
+    # put the informative failures first; 405 just means "route absent here"
+    attempts.sort(key=lambda a: ("405" in a[1], "not JSON" in a[1]))
+    return "", [], None, 0.0, "  ".join(f"{p} -> {e}" for p, e in attempts)
+
+
+def cmd_probe(session, base, model):
+    """Which chat endpoint does THIS build serve, and does the key work? Answers both
+    in one pass, with the status of every candidate."""
+    step(f"Probing chat endpoints on {base}")
+    body = chat_body(model or "test", "Reply with the single word: ok", {}, None)
+    found = None
+    for p in CHAT_PATHS:
+        d = api(session, "POST", f"{base}{p}", timeout=60, json=body)
+        if isinstance(d, dict) and "__error__" not in d:
+            txt = (((d.get("choices") or [{}])[0].get("message")) or {}).get("content", "")
+            ok(f"{p:28} works — replied {txt[:40]!r}")
+            found = found or p
+        else:
+            err = d.get("__error__", "?")
+            note = ""
+            if "405" in err:
+                note = "  (route not served on this build — expected for the fallbacks)"
+            elif "401" in err or "403" in err:
+                note = "  (the API key is not valid for THIS instance)"
+            elif "404" in err:
+                note = "  (route exists elsewhere, or the model id is unknown here)"
+            bad(f"{p:28} {err[:90]}{note}")
+    print()
+    if found:
+        ok(f"use {found} — the tool picks this automatically")
+    else:
+        bad("no chat endpoint answered")
+        info("check, in this order: the port (each library is its own instance),")
+        info("the key file for THAT instance, and that the model id exists there")
+    return found
 
 
 # ---------------------------------------------------------------- analysis bits
@@ -331,6 +404,14 @@ def run_set(session, base, model, questions, params, collection, runs, timeout,
                                      "params": params}, ensure_ascii=False) + "\n")
             if err:
                 bad(f"run {i+1}: {err}")
+                # Repeating a broken request N times produces a confident 0% and no
+                # information. Stop at the first one and say how to diagnose it.
+                if qi == 1 and i == 0:
+                    print()
+                    info(f"stopping instead of repeating this {runs * len(questions)} times")
+                    info("find the working endpoint and check the key with:")
+                    info(f"  determinism_check --instance {base} --model {model} --probe")
+                    sys.exit(1)
             else:
                 # "= run k" is more informative than "differs from run 1": three runs
                 # that agree with each other but not with the first are not three
@@ -423,6 +504,8 @@ def main():
         description="Ask the same question N times and measure how much the answer moves.")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("--list", action="store_true", help="list models/presets and exit")
+    ap.add_argument("--probe", action="store_true",
+                    help="report which chat endpoint this build serves, and exit")
     ap.add_argument("--model", help="model or preset id (see --list)")
     ap.add_argument("--question", action="append", help="a question (repeatable)")
     ap.add_argument("--questions", help="file with one question per line, '|| regex' optional")
@@ -456,6 +539,8 @@ def main():
     if a.list:
         cmd_list(session, base)
         return
+    if a.probe:
+        sys.exit(0 if cmd_probe(session, base, a.model) else 1)
     if not a.model:
         ap.print_help()
         print()
@@ -497,6 +582,7 @@ def main():
     total = len(questions) * a.runs * (2 if a.compare else 1)
     warn(f"{total} generations to run; on a large model this takes a while")
 
+    preflight_model(session, base, a.model)
     env = environment(session, base)
     if a.warmup:
         info("warmup request…")
