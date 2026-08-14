@@ -80,6 +80,13 @@ CATALOG = "https://ollama.com"
 #   *-cloud  run on Ollama's servers, not locally
 UNUSABLE_TAG_MARKERS = ("-mlx", "mlx-", ":cloud", "-cloud")
 
+# Tags that MAY be published for one platform only. The library tag page shows size,
+# context and capabilities but not the platform requirement, so the only way to find
+# out is to try: the registry answers HTTP 412 at the manifest stage, within seconds,
+# before any weights are downloaded. Observed: qwen3.8:27b-nvfp4 -> "this model
+# requires macOS" on Linux/ARM64, despite NVFP4 being an NVIDIA format.
+PLATFORM_RISK_MARKERS = ("nvfp4", "mxfp8", "mxfp4", "-metal")
+
 
 # How much model this machine can hold. Measured, not assumed: a DGX Spark has
 # ~110 GB of unified memory, a 24 GB workstation card has 23. Resolution order is
@@ -415,6 +422,63 @@ def test_model(name, quiet=False):
     return False
 
 
+def pull_with_capture(name):
+    """Run `ollama pull`, stream its output through unchanged (the progress bar uses
+    \\r, so this reads in chunks rather than lines), and keep the tail for diagnosis.
+
+    Capturing matters: the reason a pull failed is in that output, and 'pull failed'
+    on its own sends you looking for a typo when the real answer may be that the tag
+    is published for another platform, or that the disk is full."""
+    buf = []
+    try:
+        p = subprocess.Popen(["ollama", "pull", name],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as e:
+        return 1, f"could not run ollama: {e}"
+    while True:
+        chunk = p.stdout.read(256)
+        if not chunk:
+            break
+        text = chunk.decode("utf-8", "replace")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        buf.append(text)
+        if len(buf) > 40:                 # keep only the tail
+            del buf[:-40]
+    p.wait()
+    return p.returncode, "".join(buf)
+
+
+def explain_pull_failure(name, tail):
+    """Turn the registry's answer into the next thing to do."""
+    low = (tail or "").lower()
+    base = name.split(":")[0]
+
+    if "requires macos" in low or ("412" in low and "requires" in low):
+        warn("that TAG is published for another platform — nothing to do with the")
+        warn("name being wrong, and no weights were downloaded (it fails at the manifest)")
+        info("the library tag page shows size/context/capabilities but NOT the platform")
+        info("requirement, so a gated tag looks identical to a usable one there")
+        info("try a portable quantization instead, same footprint:")
+        for alt in (f"{base}:27b-q4_K_M", f"{base}:27b-mtp-q4_K_M"):
+            info(f"    python3 manage_models.py --add {alt}")
+        info(f"or list what exists:  python3 manage_models.py --tags {base}")
+        return
+    if "no space left" in low or "not enough space" in low:
+        bad("out of disk space — check with:  df -h ~/.ollama /usr/share/ollama")
+        return
+    if "manifest unknown" in low or "file does not exist" in low or "404" in low:
+        info("that name/tag does not exist in the library; list the real ones:")
+        info(f"    python3 manage_models.py --tags {base}")
+        return
+    if any(k in low for k in ("timeout", "connection", "eof", "tls", "temporary failure")):
+        warn("that looks like a network problem, not a bad name — retrying may work")
+        info("check: curl -I https://registry.ollama.ai/")
+        return
+    info("if the name or tag was wrong, list the real ones:")
+    info(f"    python3 manage_models.py --tags {base}")
+
+
 def cmd_add(name):
     step(f"Adding {name}")
     if name.split(":")[0] in KNOWN_BAD or name in KNOWN_BAD:
@@ -428,6 +492,10 @@ def cmd_add(name):
         info(f"see the usable tags with:  python3 manage_models.py --tags {name.split(':')[0]}")
         if input("  continue anyway? [y/N] ").strip().lower() not in ("y", "yes"):
             return
+    if any(k in name.lower() for k in PLATFORM_RISK_MARKERS):
+        info(f"note: '{name}' is a vendor quantization format tag; some of these are")
+        info("published for one platform only. If so the pull stops in a few seconds")
+        info("at the manifest stage — no wasted download.")
     if shutil.which("ollama") is None:
         sys.exit("the 'ollama' CLI is required to pull models")
     names = [m.get("name") for m in installed(soft=True)]
@@ -435,10 +503,10 @@ def cmd_add(name):
         info(f"{name} already installed")
     else:
         info("pulling — this can take a while…")
-        if subprocess.run(["ollama", "pull", name]).returncode != 0:
+        rc, tail = pull_with_capture(name)
+        if rc != 0:
             bad(f"pull failed for {name}")
-            info("if the name or tag was wrong, list the real ones:")
-            info(f"    python3 manage_models.py --tags {name.split(':')[0]}")
+            explain_pull_failure(name, tail)
             return
         ok("pulled")
     step("Verifying it actually loads")
