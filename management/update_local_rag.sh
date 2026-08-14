@@ -246,9 +246,43 @@ case "$OLLAMA_METHOD" in
       printf "  Re-run the ollama.com installer to update in place? [y/N] "; read -r a
       case "$a" in
         y|Y|yes|YES)
+          # install.sh REWRITES /etc/systemd/system/ollama.service. Anything set
+          # directly in that unit — notably OLLAMA_HOST=0.0.0.0, which is what lets the
+          # containers reach Ollama — is lost, and the symptom is Open WebUI showing no
+          # models after an update that "worked". Drop-ins under ollama.service.d/
+          # survive; the unit itself does not. So: record the environment, back up the
+          # unit, and compare afterwards.
+          ENV_BEFORE=$(systemctl show ollama -p Environment --value 2>/dev/null || true)
+          UNIT=/etc/systemd/system/ollama.service
+          if [ -f "$UNIT" ]; then
+            sudo cp -a "$UNIT" "$UNIT.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null \
+              && info "backed up $UNIT"
+          fi
+          [ -n "$ENV_BEFORE" ] && info "environment before: $ENV_BEFORE"
+
           curl -fsSL https://ollama.com/install.sh | sh && sudo systemctl restart ollama 2>/dev/null || true
-          ok "installer ran — verify: ollama --version, then ./llm_stack_healthcheck.sh"
-          info "if a model now runs on CPU, that is the thing to notice: check 'ollama ps'"
+          ok "installer ran: $(ollama --version 2>/dev/null | head -1)"
+
+          ENV_AFTER=$(systemctl show ollama -p Environment --value 2>/dev/null || true)
+          if [ "$ENV_BEFORE" != "$ENV_AFTER" ]; then
+            warn "the service environment CHANGED:"
+            warn "  before: ${ENV_BEFORE:-<none>}"
+            warn "  after:  ${ENV_AFTER:-<none>}"
+            case "$ENV_BEFORE" in
+              *OLLAMA_HOST*) case "$ENV_AFTER" in
+                *OLLAMA_HOST*) : ;;
+                *) warn "OLLAMA_HOST is gone — containers will not reach Ollama. Restore with:"
+                   warn "  sudo systemctl edit ollama   ->  [Service]"
+                   warn "  Environment=\"OLLAMA_HOST=0.0.0.0:11434\""
+                   warn "  then: sudo systemctl daemon-reload && sudo systemctl restart ollama" ;;
+              esac ;;
+            esac
+          else
+            ok "service environment preserved"
+          fi
+          info "verify next: ./llm_stack_healthcheck.sh"
+          info "and 'ollama ps' — PROCESSOR should stay 100% GPU, and note the CONTEXT"
+          info "column: default context sizing has changed between Ollama versions"
           ;;
         *) info "left unchanged" ;;
       esac
