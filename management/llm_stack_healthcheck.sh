@@ -39,10 +39,14 @@ fi
 ok()   { echo "  ${GREEN}✔${RESET} $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ${RED}x${RESET} $1"; FAIL=$((FAIL+1)); }
 warn() { echo "  ${YELLOW}!${RESET} $1"; }
-head() { echo; echo "${BOLD}$1${RESET}"; }
+# NOTE: do NOT name this `head`. A function by that name shadows /usr/bin/head for
+# the whole script, so every `| head -1` silently calls the heading printer with the
+# argument "-1" and the pipeline yields a heading instead of the first line. That bug
+# made model lookups return "-1" and the generation test fail on a model that exists.
+section() { echo; echo "${BOLD}$1${RESET}"; }
 
 # -----------------------------------------------------------------
-head "1. Ollama service"
+section "1. Ollama service"
 
 if systemctl is-active --quiet ollama 2>/dev/null; then
   ok "systemd service 'ollama' is active"
@@ -80,7 +84,7 @@ else
 fi
 
 # -----------------------------------------------------------------
-head "2. Hardware / GPU"
+section "2. Hardware / GPU"
 
 # Prefer the shared probe so this report and the setup script agree on the
 # numbers; fall back to querying nvidia-smi directly if it isn't around.
@@ -92,7 +96,13 @@ if [ -n "$PROBE" ] && command -v python3 >/dev/null 2>&1; then
   eval "$(python3 "$PROBE" --shell 2>/dev/null || true)"
   echo "      arch: ${RAG_ARCH:-?}   ram: ${RAG_RAM_GB:-?} GB   memory model: ${RAG_MEMORY_KIND:-?}"
   if [ "${RAG_GPU_COUNT:-0}" != "0" ]; then
-    ok "GPU visible: ${RAG_GPU_NAMES} (${RAG_VRAM_GB} GB VRAM, driver ${RAG_DRIVER:-?})"
+    # On unified-memory parts (GB10 and friends) there is no separate VRAM pool, so
+    # nvidia-smi reports 0 — printing "0.0 GB VRAM" reads like a fault when it isn't.
+    if [ "${RAG_MEMORY_KIND:-}" = "unified" ]; then
+      ok "GPU visible: ${RAG_GPU_NAMES} (unified memory, no separate VRAM pool; driver ${RAG_DRIVER:-?})"
+    else
+      ok "GPU visible: ${RAG_GPU_NAMES} (${RAG_VRAM_GB} GB VRAM, driver ${RAG_DRIVER:-?})"
+    fi
   else
     warn "no NVIDIA GPU detected — inference will run on CPU (slow but functional)"
   fi
@@ -118,13 +128,19 @@ fi
 # Pick which model to test: the preferred one if installed, else auto-fall back
 # to any installed chat model (excluding embedding/vision models).
 GEN_MODEL=""
+# Installed tags usually carry a variant/quant suffix (gemma4:26b-a4b-it-qat), so an
+# exact match on a plain preference like "gemma4:26b" fails and the check reports the
+# preferred model as missing when it is in fact installed. Try exact, then prefix.
+TEST_ESC=$(printf '%s' "$TEST_MODEL" | sed 's/[.[\*^$+?(){}|]/\\&/g')
 if echo "$MODEL_NAMES" | grep -qx "$TEST_MODEL"; then
   GEN_MODEL="$TEST_MODEL"
 else
-  GEN_MODEL=$(echo "$MODEL_NAMES" | grep -viE "$EMBED_PAT|$VISION_PAT" | head -1)
+  GEN_MODEL=$(echo "$MODEL_NAMES" | grep -E "^${TEST_ESC}([-:]|$)" | head -1)
+  [ -z "$GEN_MODEL" ] && \
+    GEN_MODEL=$(echo "$MODEL_NAMES" | grep -viE "$EMBED_PAT|$VISION_PAT" | head -1)
 fi
 
-head "3. Generation test (${GEN_MODEL:-none available})"
+section "3. Generation test (${GEN_MODEL:-none available})"
 
 if [ -n "$GEN_MODEL" ]; then
   [ "$GEN_MODEL" != "$TEST_MODEL" ] && warn "preferred '$TEST_MODEL' not installed — testing '$GEN_MODEL' instead"
@@ -148,7 +164,7 @@ else
 fi
 
 # -----------------------------------------------------------------
-head "4. Open WebUI  ($OPENWEBUI_URL)"
+section "4. Open WebUI  ($OPENWEBUI_URL)"
 
 STATE=$($DOCKER inspect -f '{{.State.Status}}' "$OPENWEBUI_CONTAINER" 2>/dev/null)
 [ "$STATE" = "running" ] && ok "container '$OPENWEBUI_CONTAINER' is running" \
@@ -169,7 +185,7 @@ if [ -n "$($DOCKER ps -q -f name=^/${OPENWEBUI_CONTAINER}$ 2>/dev/null)" ]; then
 fi
 
 # -----------------------------------------------------------------
-head "5. AnythingLLM  ($ANYTHINGLLM_URL)"
+section "5. AnythingLLM  ($ANYTHINGLLM_URL)"
 
 STATE=$($DOCKER inspect -f '{{.State.Status}}' "$ANYTHINGLLM_CONTAINER" 2>/dev/null)
 [ "$STATE" = "running" ] && ok "container '$ANYTHINGLLM_CONTAINER' is running" \
@@ -191,7 +207,7 @@ if [ -n "$($DOCKER ps -q -f name=^/${ANYTHINGLLM_CONTAINER}$ 2>/dev/null)" ]; th
 fi
 
 # -----------------------------------------------------------------
-head "6. Restart policies (survives reboot?)"
+section "6. Restart policies (survives reboot?)"
 for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER"; do
   POL=$($DOCKER inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$c" 2>/dev/null)
   case "$POL" in
@@ -202,7 +218,7 @@ for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER"; do
 done
 
 # -----------------------------------------------------------------
-head "7. Optional add-ons (informational)"
+section "7. Optional add-ons (informational)"
 # these are only present if you enabled Tika extraction or a containerized
 # vision model; report status without affecting pass/fail.
 found_addon=0
