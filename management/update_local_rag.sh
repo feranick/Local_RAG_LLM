@@ -11,10 +11,13 @@
 #   - optional add-ons if present: tika, ollama-vision
 #
 # NOT updated by default:
-#   - Ollama itself. On the DGX Spark it's a CUSTOM Blackwell-optimized build;
-#     the generic installer would replace it with the stock ARM build and lose
-#     the FP4/GB10 optimizations. Update Ollama via DGX OS / NVIDIA channels.
-#     (--include-ollama forces the generic installer anyway, with a warning.)
+#   - Ollama itself. It is a host package, not a container, and the right update
+#     command depends on how it was installed: snap (the DGX Spark default) is
+#     `sudo snap refresh ollama`; an install.sh binary is re-running that script.
+#     There is NO ollama package in Ubuntu or DGX OS apt repositories. The script
+#     detects which case you are in and prints the matching command.
+#     (--include-ollama re-runs the generic installer, but only for a binary
+#     install — on a snap that would give you two Ollamas, so it refuses.)
 #
 # Usage:
 #   chmod +x update_local_rag.sh
@@ -190,28 +193,73 @@ if [ "$PULL_MODELS" -eq 1 ] && [ "$CHECK" -eq 0 ]; then
   fi
 fi
 
-# ---- Ollama (opt-in, with warning) ----
-if [ "$INCLUDE_OLLAMA" -eq 1 ]; then
-  step "Ollama"
-  CUR=$(ollama --version 2>/dev/null | head -1)
-  warn "Current: ${CUR:-unknown}"
-  warn "On the DGX Spark, Ollama is a custom Blackwell build. The generic installer"
-  warn "may REPLACE it with the stock ARM build and lose GB10/FP4 optimizations."
-  if [ "$CHECK" -eq 1 ]; then
-    warn "(--check) not updating Ollama."
-  else
-    printf "  Really update Ollama with the generic installer? [y/N] "; read -r a
-    case "$a" in
-      y|Y|yes|YES) curl -fsSL https://ollama.com/install.sh | sh && sudo systemctl restart ollama 2>/dev/null || true
-                   ok "Ollama installer ran (verify with: ollama --version; and re-check vision models)" ;;
-      *) info "skipped Ollama update (recommended: update via DGX OS)" ;;
-    esac
+# ---- Ollama (opt-in) ----
+#
+# This script's remit is the containers. Ollama is left alone by default because it
+# is a host package, and — importantly — because HOW it should be updated depends on
+# how it was installed. There is no Ollama package in the Ubuntu or DGX OS apt
+# repositories: DGX OS updates the driver, firmware and CUDA stack, not Ollama.
+#
+#   snap    preinstalled on DGX Spark images (/snap/bin/ollama, configured with
+#           `snap set ollama host=…`, no plain ollama.service). Update: snap refresh.
+#           Running the generic installer on top of a snap leaves TWO installations
+#           and a PATH that decides which one you get — that is the thing to avoid.
+#   binary  installed by ollama.com/install.sh into /usr/local/bin. Update: re-run it.
+#   deb     packaged by some distributions. Update: the package manager.
+ollama_install_method() {
+  local bin real
+  bin=$(command -v ollama 2>/dev/null) || { echo absent; return; }
+  real=$(readlink -f "$bin" 2>/dev/null || echo "$bin")
+  case "$real" in /snap/*) echo snap; return ;; esac
+  if command -v snap >/dev/null 2>&1 && snap list ollama >/dev/null 2>&1; then
+    echo snap; return
   fi
-else
-  step "Ollama"
-  info "current: $(ollama --version 2>/dev/null | head -1 || echo unknown)"
-  info "left unchanged (custom Spark build — update via DGX OS, or pass --include-ollama)"
-fi
+  if command -v dpkg >/dev/null 2>&1 && dpkg -S "$real" >/dev/null 2>&1; then
+    echo deb; return
+  fi
+  echo binary
+}
+
+step "Ollama"
+OLLAMA_METHOD=$(ollama_install_method)
+info "current: $(ollama --version 2>/dev/null | head -1 || echo unknown)   installed as: $OLLAMA_METHOD"
+
+case "$OLLAMA_METHOD" in
+  snap)
+    info "update with:  sudo snap refresh ollama        (snaps also auto-refresh)"
+    info "check channel: snap info ollama | grep -A3 channels"
+    if [ "$INCLUDE_OLLAMA" -eq 1 ]; then
+      warn "--include-ollama runs the GENERIC installer, which would install a SECOND"
+      warn "Ollama alongside the snap. Use 'sudo snap refresh ollama' instead."
+      info "not touching it"
+    fi
+    ;;
+  deb)
+    info "update with your package manager (e.g. sudo apt install --only-upgrade ollama)"
+    [ "$INCLUDE_OLLAMA" -eq 1 ] && warn "--include-ollama would shadow the packaged copy; using apt is cleaner"
+    ;;
+  binary)
+    if [ "$INCLUDE_OLLAMA" -eq 1 ] && [ "$CHECK" -eq 0 ]; then
+      # Worth knowing on GB10: early Spark images shipped an Ollama ahead of upstream
+      # GB10 support. Upstream has since caught up, so a recent version is not
+      # "downgraded" by re-running the installer — but a GPU check afterwards is cheap.
+      printf "  Re-run the ollama.com installer to update in place? [y/N] "; read -r a
+      case "$a" in
+        y|Y|yes|YES)
+          curl -fsSL https://ollama.com/install.sh | sh && sudo systemctl restart ollama 2>/dev/null || true
+          ok "installer ran — verify: ollama --version, then ./llm_stack_healthcheck.sh"
+          info "if a model now runs on CPU, that is the thing to notice: check 'ollama ps'"
+          ;;
+        *) info "left unchanged" ;;
+      esac
+    else
+      info "update with:  curl -fsSL https://ollama.com/install.sh | sh   (or --include-ollama)"
+    fi
+    ;;
+  absent)
+    warn "ollama CLI not found on PATH — nothing to report"
+    ;;
+esac
 
 # ---- done ----
 echo

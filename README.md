@@ -748,7 +748,21 @@ It only recreates a container when its image actually changed, preserves the dat
 
 > **After an Open WebUI image update, clear the browser cache once.** The updated container serves new JS chunk names, so a cached app shell from the old version 404s and the UI gets stuck on the "OI" splash in a reload loop. Fix: DevTools → Application → Storage → **Clear site data** (a plain hard-refresh often won't clear the service worker), then reload. Nothing is wrong server-side — see the sync README's troubleshooting for how to tell this apart from Ollama being busy.
 
-**Ollama is left alone by default.** On the DGX Spark it's a custom Blackwell-optimized build; the generic `ollama.com` installer would replace it with the stock ARM build and lose the GB10/FP4 optimizations — so update Ollama through DGX OS / NVIDIA channels instead. `--include-ollama` will run the generic installer anyway, but only after a warning and confirmation (not recommended on the Spark).
+**Ollama is left alone by default** — it's a host package, not a container, and the correct update command depends on how it was installed. There is **no `ollama` package in the Ubuntu or DGX OS apt repositories**: DGX OS updates the driver, firmware and CUDA stack, not Ollama. Which case you're in:
+
+```bash
+readlink -f "$(command -v ollama)"    # /snap/... => snap, /usr/local/bin => install.sh
+snap list ollama 2>/dev/null          # present => snap
+systemctl list-units 'ollama*' 'snap.ollama*' --all
+```
+
+| Installed as | Update with |
+|---|---|
+| **snap** (the DGX Spark default: `/snap/bin/ollama`, configured via `snap set ollama host=…`, no plain `ollama.service`) | `sudo snap refresh ollama` — snaps also auto-refresh |
+| **binary** from `ollama.com/install.sh` (`/usr/local/bin/ollama`) | re-run the installer, or `update_local_rag.sh --include-ollama` |
+| **distribution package** | your package manager |
+
+`update_local_rag.sh` detects this and prints the matching command; `--include-ollama` only re-runs the generic installer for a *binary* install, and refuses on a snap — running it there would leave two Ollamas and let `PATH` decide which one you get. Early Spark images did ship an Ollama ahead of upstream GB10 support, which is where the "don't touch it" advice came from; upstream has since caught up, so on a current version that concern is historical. Verify with `./llm_stack_healthcheck.sh` and `ollama ps` (watch the `PROCESSOR` column) after any Ollama change.
 
 ---
 
