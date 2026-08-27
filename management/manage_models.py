@@ -80,11 +80,12 @@ CATALOG = "https://ollama.com"
 #   *-cloud  run on Ollama's servers, not locally
 UNUSABLE_TAG_MARKERS = ("-mlx", "mlx-", ":cloud", "-cloud")
 
-# Tags that MAY be published for one platform only. The library tag page shows size,
-# context and capabilities but not the platform requirement, so the only way to find
-# out is to try: the registry answers HTTP 412 at the manifest stage, within seconds,
-# before any weights are downloaded. Observed: qwen3.8:27b-nvfp4 -> "this model
-# requires macOS" on Linux/ARM64, despite NVFP4 being an NVIDIA format.
+# Tags named after a numeric format rather than a runtime. Counter-intuitively these
+# are Apple MLX builds in the current library — `qwen3.8:27b-nvfp4` shares its digest
+# with `qwen3.8:27b-mlx`, so it is literally the same artifact, and pulling it on Linux
+# gives "412: this model requires macOS" despite NVFP4 being an NVIDIA format. The name
+# describes what the weights were quantized to, not what can run them. `--tags` now
+# reads the MLX badge directly, so this list is only a pre-pull hint.
 PLATFORM_RISK_MARKERS = ("nvfp4", "mxfp8", "mxfp4", "-metal")
 
 
@@ -132,12 +133,21 @@ def _size_gb(txt):
 
 
 def catalog_tags(name):
-    """[(tag, size_gb, context, note)] for a model, from its library page.
+    """[dict(tag, gb, ctx, vision, mlx, digest)] for a model, from its library page.
 
-    Each row is a link to /library/<name>:<tag> followed by the digest, download
-    size, context window and input types. Rows are bounded by the next *different*
-    tag link so one row's size can't be read off the row below it (cloud tags in
-    particular publish no size at all).
+    Each row is a link to /library/<name>:<tag> followed by an optional format badge,
+    the digest, download size, context window and input types. Rows are bounded by the
+    next *different* tag link so one row's size can't be read off the row below it
+    (cloud tags in particular publish no size at all).
+
+    The **MLX badge** is the important one, and the reason this function reads it: tags
+    are named after the numeric format they were quantized to, not after the runtime.
+    In the current library `qwen3.8:27b-nvfp4` and `27b-mxfp8` are badged MLX — Apple
+    builds — and `27b-nvfp4` even shares its digest with `27b-mlx`, i.e. it is the same
+    artifact under a second name. Pulling one on Linux fails with
+    "412: this model requires macOS", which reads like a mistake unless you saw the
+    badge. Nothing about the tag name gives that away, so the badge is parsed and the
+    digest is kept to expose aliases.
     """
     html = http_get(f"{CATALOG}/library/{name}/tags")
     hits = list(re.finditer(r"/library/" + re.escape(name) + r":([A-Za-z0-9._\-]+)", html))
@@ -153,9 +163,15 @@ def catalog_tags(name):
                 stop = nxt.start()
                 break
         window = html[m.end():min(stop, m.end() + 1500)]
-        out.append((tag, _size_gb(window),
-                    (re.search(r"(\d+K)\s*context", window) or [None, "?"])[1],
-                    "vision" if re.search(r"Text,\s*Image", window) else ""))
+        text = _text(window)
+        out.append({
+            "tag": tag,
+            "gb": _size_gb(window),
+            "ctx": (re.search(r"(\d+K)\s*context", window) or [None, "?"])[1],
+            "vision": bool(re.search(r"Text,\s*Image", window)),
+            "mlx": bool(re.search(r"\bMLX\b", text)),
+            "digest": (re.search(r"\b([0-9a-f]{12})\b", text) or [None, ""])[1],
+        })
     return out
 
 
@@ -269,28 +285,44 @@ def cmd_tags(name, show_all):
         info(f"open {CATALOG}/library/{name}/tags to check")
         return
     have = {m.get("name", "") for m in installed(soft=True)}
+    # Tags sharing a digest are the same build under different names. Showing that
+    # saves pulling "two" models to compare and finding they are byte-identical.
+    first_by_digest = {}
+    for t in tags:
+        if t["digest"]:
+            first_by_digest.setdefault(t["digest"], t["tag"])
     hidden = 0
     print(f"  {'tag':30} {'size':>8}  {'ctx':>6}  notes")
-    for tag, gb, ctx, note in tags:
+    for t in tags:
+        tag, gb = t["tag"], t["gb"]
         full = f"{name}:{tag}"
-        unusable = any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS)
+        # unusable = a cloud tag, an -mlx name, OR anything the page badges MLX
+        # (which is how -nvfp4 / -mxfp8 are published)
+        unusable = t["mlx"] or any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS)
         if unusable and not show_all:
             hidden += 1
             continue
         bits = []
-        if note:
-            bits.append(note)
-        if unusable:
-            bits.append("NOT usable locally (Apple-MLX or cloud tag)")
+        if t["vision"]:
+            bits.append("vision")
+        if t["mlx"]:
+            bits.append("MLX — Apple only, will fail with 'requires macOS'")
+        elif any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS):
+            bits.append("NOT usable locally (cloud tag)")
         elif gb and gb > USABLE_MEM_GB:
             bits.append(f"too big for {USABLE_MEM_GB:.0f} GB")
         elif gb and gb > USABLE_MEM_GB / 2:
             bits.append("large — will be slow")
+        alias = first_by_digest.get(t["digest"])
+        if alias and alias != tag:
+            bits.append(f"same build as :{alias}")
         mark = f"{G}✔{X}" if full in have else " "
         size = "?" if not gb else (f"{gb:.1f} GB" if gb < 10 else f"{gb:.0f} GB")
-        print(f"  {mark} {full:28} {size:>8}  {ctx:>6}  {', '.join(bits)}")
+        print(f"  {mark} {full:28} {size:>8}  {t['ctx']:>6}  {', '.join(bits)}")
     if hidden:
-        info(f"{hidden} Apple-MLX/cloud tag(s) hidden — use --all to see them")
+        info(f"{hidden} MLX/cloud tag(s) hidden — use --all to see them")
+        info("MLX tags are Apple builds. Note the format-named ones (-nvfp4, -mxfp8)")
+        info("are MLX too: the name is the numeric format, not the vendor's runtime.")
     print(f"\n  install one with:  python3 manage_models.py --add {name}:<tag>")
 
 
@@ -454,6 +486,22 @@ def explain_pull_failure(name, tail):
     low = (tail or "").lower()
     base = name.split(":")[0]
 
+    # Ollama reports this two different ways for the same cause: the registry may
+    # refuse the manifest (412 "requires macOS"), or the client fetches it and then
+    # finds the declared runtime missing ("requires MLX support"). The second wording
+    # is the more informative one — it is Ollama reading the model's own metadata.
+    if "mlx" in low and ("not available" in low or "requires" in low):
+        warn("that tag is an Apple **MLX** build, whatever its name suggests")
+        info("NVFP4 / MXFP8 are numeric ENCODINGS, not runtimes: NVIDIA defined NVFP4,")
+        info("Apple's MLX implements it too, and this tag is the MLX packaging of it.")
+        info(f"the digests give it away — '{name}' shares one with the ':...-mlx' tag,")
+        info("i.e. it is the same artifact under a second name")
+        info("GGUF has no NVFP4 quant type, so Ollama has no CUDA path for it at all;")
+        info("FP4 on Blackwell means vLLM or TensorRT-LLM, not Ollama")
+        info("here, the 4-bit option is q4_K_M:")
+        for alt in (f"{base}:27b", f"{base}:27b-q4_K_M"):
+            info(f"    python3 manage_models.py --add {alt}")
+        return
     if "requires macos" in low or ("412" in low and "requires" in low):
         warn("that TAG is published for another platform — nothing to do with the")
         warn("name being wrong, and no weights were downloaded (it fails at the manifest)")
@@ -493,9 +541,10 @@ def cmd_add(name):
         if input("  continue anyway? [y/N] ").strip().lower() not in ("y", "yes"):
             return
     if any(k in name.lower() for k in PLATFORM_RISK_MARKERS):
-        info(f"note: '{name}' is a vendor quantization format tag; some of these are")
-        info("published for one platform only. If so the pull stops in a few seconds")
-        info("at the manifest stage — no wasted download.")
+        warn(f"'{name}' is named after a numeric format, not a runtime — in the current")
+        warn("library these tags (-nvfp4, -mxfp8) are badged MLX, i.e. Apple builds")
+        info(f"check the badge:  python3 manage_models.py --tags {name.split(':')[0]} --all")
+        info("if it is MLX, the pull will stop at the manifest with 'requires macOS'")
     if shutil.which("ollama") is None:
         sys.exit("the 'ollama' CLI is required to pull models")
     names = [m.get("name") for m in installed(soft=True)]
