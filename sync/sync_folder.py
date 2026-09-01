@@ -75,6 +75,9 @@ Usage:
   python3 sync_folder.py --describe-figures    # also index vision descriptions of plots
   python3 sync_folder.py --force               # re-sync everything (re-embed), no duplicates
   python3 sync_folder.py --status               # how far along? (safe during a run)
+  RAG_BASE_URL=http://localhost:3000 RAG_KEY_FILE=~/.rag_sync_key \
+      python3 sync_folder.py --discover         # lost the .conf? rebuild it from the
+                                                # server + the existing state files
   python3 sync_folder.py --recaption            # redo existing figure/image captions
                                                 # with the current FIGURE_MODEL only:
                                                 # documents are NOT re-embedded
@@ -1351,6 +1354,89 @@ def cmd_status():
     print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")
 
 
+def cmd_discover():
+    """Rebuild a lost config by asking the server and the state files what exists.
+
+    The dangerous part of losing a .conf is not the file — it is that a NEW state
+    file makes every document look new, so the next sync uploads the whole library a
+    second time. The original state file is usually still sitting in $HOME, and it
+    records the target id it belongs to. This matches the two up and prints a config
+    you can paste, plus the count comparison that says whether they agree.
+
+    Needs only the instance URL and key:
+      RAG_BASE_URL=http://localhost:3000 RAG_KEY_FILE=~/.rag_sync_key \\
+        python3 sync_folder.py --discover
+    """
+    print(f"[sync] discovering on {BASE_URL}")
+    if not API_KEY:
+        die("need an API key: RAG_KEY_FILE=~/.rag_sync_key (or RAG_API_KEY=sk-…)")
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Bearer {API_KEY}"})
+    try:
+        r = session.get(f"{BASE_URL}/api/v1/knowledge/", timeout=60)
+        r.raise_for_status()
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            die("that URL answered with HTML, not JSON — wrong port for this instance?")
+        cols = r.json()
+    except Exception as e:
+        die(f"could not list collections: {e}")
+
+    # every state file in $HOME, indexed by the target it was written for
+    states = {}
+    for p in sorted(pathlib.Path.home().glob(".rag_sync_state*.json")):
+        try:
+            d = json.loads(p.read_text())
+        except Exception as e:
+            print(f"[sync]   ! {p.name}: unreadable ({e})")
+            continue
+        files = d.get("files") or {}
+        paths = [pathlib.Path(k) for k in files]
+        # the common parent of the tracked paths is the WATCH_DIR that produced them
+        watch = ""
+        if paths:
+            try:
+                watch = os.path.commonpath([str(x.parent) for x in paths])
+            except ValueError:
+                watch = str(paths[0].parent)
+        states[d.get("target")] = {"file": p, "n": len(files), "watch": watch,
+                                   "captions": len(caption_inventory(d))}
+        print(f"[sync]   state {p.name}: {len(files)} file(s), target="
+              f"{d.get('target') or '(none recorded)'}, dir={watch or '?'}")
+    if not states:
+        print("[sync]   no ~/.rag_sync_state*.json found — a fresh sync would re-upload "
+              "everything, which Open WebUI will mostly reject as duplicate content")
+
+    print()
+    for c in cols if isinstance(cols, list) else []:
+        cid = c.get("id")
+        name = c.get("name")
+        n_remote = len((c.get("files") or []))
+        st = states.get(cid)
+        print(f"[sync] collection '{name}'  id={cid}")
+        print(f"[sync]   server reports {n_remote} file(s) attached")
+        if st:
+            agree = "matches" if st["n"] == n_remote else "DIFFERS from"
+            print(f"[sync]   state file {st['file'].name}: {st['n']} tracked — {agree} "
+                  f"the server")
+            print(f"[sync]   {st['captions']} caption doc(s) recorded")
+            print(f"[sync]   --- paste into <name>.conf ---")
+            print(f"BACKEND    = openwebui")
+            print(f"BASE_URL   = {BASE_URL}")
+            print(f"TARGET     = {cid}")
+            print(f"WATCH_DIR  = {st['watch'] or '<your documents folder>'}")
+            print(f"KEY_FILE   = {KEY_FILE}")
+            print(f"STATE_FILE = {st['file']}")
+            print(f"[sync]   ---------------------------------")
+        else:
+            print("[sync]   no state file recorded for this id. If you sync it with a "
+                  "fresh state file, every document is treated as new.")
+        print()
+    print("[sync] verify with:  python3 sync_folder.py --config <name>.conf --status")
+    print("[sync] '0 to go' means the state file is the right one. A number close to the")
+    print("[sync] whole library means it is NOT — fix that before syncing, or you get a")
+    print("[sync] second copy of everything.")
+
+
 def main():
     # show which configuration is actually in effect — makes a wrong TARGET or a
     # shared STATE_FILE obvious before anything is uploaded
@@ -1359,6 +1445,9 @@ def main():
         return
     if "--status" in sys.argv:
         cmd_status()
+        return
+    if "--discover" in sys.argv:
+        cmd_discover()
         return
     print(f"[sync] v{__version__} | config: "
           f"{CONFIG_PATH if CONFIG_PATH else '(none found — using defaults/env)'}")
