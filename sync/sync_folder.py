@@ -1406,8 +1406,30 @@ def cmd_discover():
         print("[sync]   no ~/.rag_sync_state*.json found — a fresh sync would re-upload "
               "everything, which Open WebUI will mostly reject as duplicate content")
 
+    # The list may arrive bare or wrapped, and "no collections" must be reported
+    # rather than silently skipped: an empty list from a 200 response means the key
+    # is valid but sees nothing, which is a different problem from a bad key.
+    items = cols.get("data") if isinstance(cols, dict) else cols
+    if not isinstance(items, list):
+        print(f"[sync] unexpected response shape from /api/v1/knowledge/: "
+              f"{type(cols).__name__} — cannot list collections")
+        items = []
     print()
-    for c in cols if isinstance(cols, list) else []:
+    if not items:
+        print("[sync] this key can see ZERO collections on this instance.")
+        print("[sync] The key is valid (the request succeeded) — it just belongs to a")
+        print("[sync] different account than the one that owns them, or the collections")
+        print("[sync] are private to another user. Collections are per-user in Open WebUI.")
+        print("[sync] Check whose key this is:")
+        print(f"[sync]   curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" \\")
+        print(f"[sync]        {BASE_URL}/api/v1/auths/ | python3 -m json.tool")
+        print("[sync] Then, logged in as the owner in the UI: Settings → Account → API")
+        print(f"[sync] keys → create one, and write it to {KEY_FILE} (chmod 600).")
+        print("[sync] Other key files present:")
+        for k in sorted(pathlib.Path.home().glob(".rag_sync_key*")):
+            print(f"[sync]   {k}")
+        return
+    for c in items:
         cid = c.get("id")
         name = c.get("name")
         n_remote = len((c.get("files") or []))
