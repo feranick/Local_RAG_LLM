@@ -82,6 +82,11 @@ Usage:
                                                 # with the current FIGURE_MODEL only:
                                                 # documents are NOT re-embedded
   python3 sync_folder.py --recaption --limit 5  # try five first, to time the change
+  python3 sync_folder.py --config X.conf --wipe  # empty THIS collection (detach +
+                                                # delete its file objects) and clear
+                                                # its state, for a clean re-index.
+                                                # Other collections are untouched;
+                                                # add --dry-run to see the plan first
 """
 
 __version__ = "2026.09.01.1"
@@ -194,6 +199,22 @@ def _load_config(path):
 
 
 CONFIG_PATH = _find_config()
+
+# An explicitly requested config that does not exist must be a hard error. Silently
+# falling back to the defaults is worse than failing: WATCH_DIR becomes ~/papers and
+# STATE_FILE becomes ~/.rag_sync_state.json, the run looks plausible, and it reports
+# on a library you didn't ask about — or syncs the wrong folder into the wrong
+# collection. Discovered exactly that way: `--config papers.conf` with no such file
+# printed a tidy status for the default library instead.
+_CONFIG_WAS_EXPLICIT = bool(os.environ.get("RAG_CONFIG")) or any(
+    a == "--config" or a.startswith("--config=") for a in sys.argv)
+if _CONFIG_WAS_EXPLICIT and (CONFIG_PATH is None or not CONFIG_PATH.is_file()):
+    sys.exit(f"[sync] config file not found: {CONFIG_PATH}\n"
+             f"       Nothing was read, so every setting would fall back to its\n"
+             f"       default (WATCH_DIR ~/papers, STATE_FILE ~/.rag_sync_state.json).\n"
+             f"       Create it first — 'sync_folder.py --discover' prints a block to\n"
+             f"       paste, or '--init-config' writes a commented template.")
+
 CONFIG = _load_config(CONFIG_PATH)
 _TRUE = ("1", "true", "yes", "on")
 
@@ -1109,6 +1130,92 @@ def caption_inventory(state):
     return out
 
 
+def cmd_wipe(session, assume_yes=False, dry_run=False):
+    """Empty THIS collection and clear its state file, so the next sync is a clean add.
+
+    Why not the documented `DELETE /api/v1/files/all`: that removes every uploaded file
+    in the instance, across all collections. On an instance hosting a second library
+    (here: LabNotes alongside Papers) it destroys that one too. This detaches and then
+    deletes only the file objects attached to TARGET, leaving other collections alone.
+
+    Deleting the file objects — not just detaching them — is the part that matters for
+    a re-add: an orphaned file object keeps its content hash, and the duplicate check
+    still compares against it.
+    """
+    if not TARGET:
+        die("no TARGET in the config — refusing to wipe an unspecified collection")
+    step = f"[sync] wipe collection {TARGET} on {BASE_URL}"
+    print(step)
+    other = read_beat()
+    if other and pid_alive(other.get("pid")) and other.get("pid") != os.getpid():
+        die(f"a sync is running (pid {other['pid']}) — stop it first: kill {other['pid']}")
+
+    try:
+        r = session.get(f"{BASE_URL}/api/v1/knowledge/{TARGET}", timeout=120)
+        r.raise_for_status()
+        detail = r.json()
+    except Exception as e:
+        die(f"could not read the collection: {e}")
+    name = detail.get("name") or "(unnamed)"
+    ids = [f.get("id") for f in (detail.get("files") or []) if isinstance(f, dict) and f.get("id")]
+    if not ids:
+        d = detail.get("data") or {}
+        ids = [i for i in (d.get("file_ids") or []) if isinstance(i, str)]
+
+    print(f"[sync] collection '{name}' holds {len(ids)} file object(s)")
+    print(f"[sync] this will:")
+    print(f"[sync]   1. reset the collection (detach everything)")
+    print(f"[sync]   2. DELETE those {len(ids)} file object(s) — only these, no other "
+          f"collection is touched")
+    print(f"[sync]   3. back up and remove {STATE_FILE}")
+    print(f"[sync] the documents on disk in {WATCH_DIR} are NOT touched")
+    if dry_run:
+        print("[sync] --dry-run: nothing done")
+        return
+    if not assume_yes:
+        typed = input(f"\n  type the collection name ('{name}') to confirm: ").strip()
+        if typed != name:
+            die("name did not match — nothing done")
+
+    try:
+        r = session.post(f"{BASE_URL}/api/v1/knowledge/{TARGET}/reset", timeout=300)
+        print(f"[sync] reset: HTTP {r.status_code}"
+              + ("" if r.ok else f" — {(r.text or '')[:120]}"))
+    except Exception as e:
+        print(f"[sync] reset failed: {e}")
+
+    gone = failed = 0
+    for i, fid in enumerate(ids, 1):
+        try:
+            r = session.delete(f"{BASE_URL}/api/v1/files/{fid}", timeout=120)
+            if r.ok:
+                gone += 1
+            else:
+                failed += 1
+                if failed <= 3:
+                    print(f"[sync]   file {fid}: HTTP {r.status_code} "
+                          f"{(r.text or '')[:80]}")
+        except Exception as e:
+            failed += 1
+            if failed <= 3:
+                print(f"[sync]   file {fid}: {e}")
+        if i % 200 == 0:
+            print(f"[sync]   deleted {i}/{len(ids)}…")
+    print(f"[sync] deleted {gone} file object(s)" + (f", {failed} failed" if failed else ""))
+
+    if STATE_FILE.is_file():
+        bak = STATE_FILE.with_suffix(STATE_FILE.suffix + ".bak")
+        try:
+            shutil.copy2(STATE_FILE, bak)
+            STATE_FILE.unlink()
+            print(f"[sync] state file removed (backup: {bak})")
+        except OSError as e:
+            print(f"[sync] could not clear the state file: {e}")
+    print("[sync] the collection is now empty. Next, a clean indexing run, e.g.:")
+    print(f"  python3 {pathlib.Path(__file__).name} --config <conf> --describe-figures "
+          f"--ocr-fallback")
+
+
 def cmd_recaption(session, state, add_fn, remove_fn, limit=0):
     """Redo existing figure/image descriptions with the CURRENT figure model.
 
@@ -1274,6 +1381,10 @@ def cmd_status():
     Compares the state file against the folder. Because state is checkpointed
     every 10 files, the count during a run is accurate to within ~10 files.
     """
+    # Name the config first: a status report for the wrong library is indistinguishable
+    # from a healthy one unless you can see which settings produced it.
+    print(f"[sync] config: {CONFIG_PATH if CONFIG_PATH else '(none — defaults/env)'}")
+    print(f"[sync] target: {TARGET or '(unset)'}")
     print(f"[sync] status for {WATCH_DIR}")
     print(f"[sync] state file: {STATE_FILE}")
     if not STATE_FILE.is_file():
@@ -1592,6 +1703,11 @@ def main():
               "(old remote ids can't be reused).")
         state = {"files": {}}
     state["backend"], state["target"] = BACKEND, TARGET
+
+    if "--wipe" in sys.argv:
+        cmd_wipe(session, assume_yes="--yes" in sys.argv,
+                 dry_run="--dry-run" in sys.argv)
+        return
 
     if RECAPTION:
         cmd_recaption(session, state, add_fn, remove_fn, limit=RECAPTION_LIMIT)

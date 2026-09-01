@@ -1,6 +1,6 @@
 # Full library rebuild — runbook
 
-**Version 2026.08.13.1**
+**Version 2026.09.01.1**
 
 Every command, in order, with a verification checkpoint after each stage. Don't
 move to the next stage until its check passes — that's the whole point of the
@@ -196,24 +196,44 @@ cat $CONF     # TARGET, WATCH_DIR, KEY_FILE, STATE_FILE — all correct?
 Empty the collection, then clear the state so the sync treats every file as new.
 `$TARGET` here is the **id** from the top of this runbook, not the collection's name:
 
+**Preferred — `--wipe`, which handles all three steps for this collection only:**
+
+```bash
+python3 $SYNC --config $CONF --wipe --dry-run    # see the plan
+python3 $SYNC --config $CONF --wipe              # asks you to type the collection name
+
+python3 $SYNC --config $CONF --describe-figures --ocr-fallback
+```
+
+It resets the collection, **deletes the file objects that were attached to it** (not
+just detaches them), and backs up and removes the `STATE_FILE` from `$CONF`. Documents
+on disk are never touched, and no other collection is affected.
+
+Deleting the file objects is the step that makes a re-add clean: a detached-but-alive
+file object keeps its content hash, and Open WebUI's duplicate check still compares
+against it — so a re-index would report duplicates instead of indexing.
+
+<details>
+<summary>By hand, if you prefer curl</summary>
+
 ```bash
 curl -sS -X POST "$BASE/api/v1/knowledge/$TARGET/reset" \
   -H "Authorization: Bearer $KEY"; echo
 curl -sS -X DELETE "$BASE/api/v1/files/all" \
   -H "Authorization: Bearer $KEY"; echo
 rm -f ~/.rag_sync_state.json        # use the STATE_FILE named in $CONF
-
-python3 $SYNC --config $CONF --describe-figures --ocr-fallback
 ```
 
 `reset` returns the collection's JSON on success. A `404 We could not find what
 you're looking for :/` means `$TARGET` holds a name instead of the id, or the key
 belongs to a different instance than `$BASE`.
 
-`DELETE /files/all` removes **every** uploaded file in that instance, across all
-collections — correct for a single-library rebuild, wrong if the instance hosts
-another library. Skip it in that case; `reset` alone is enough, at the cost of
-leaving orphaned file objects that the duplicate check still compares against.
+> **`DELETE /files/all` removes every uploaded file in the instance, across all
+> collections.** It is correct only when this instance hosts a single library. If it
+> also hosts, say, a LabNotes collection, that collection's files are destroyed too —
+> which is exactly why `--wipe` exists.
+
+</details>
 
 Run it in `tmux`/`screen` — with figure descriptions this takes hours. Progress is
 numbered with an ETA, and from another terminal:
