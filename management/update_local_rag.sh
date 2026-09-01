@@ -252,6 +252,11 @@ case "$OLLAMA_METHOD" in
           # models after an update that "worked". Drop-ins under ollama.service.d/
           # survive; the unit itself does not. So: record the environment, back up the
           # unit, and compare afterwards.
+          # `ollama --version` reports the SERVER's version when one is reachable, so
+          # it keeps showing the old number if the service wasn't really restarted.
+          # The API is the authoritative source; record it to compare afterwards.
+          SRV_BEFORE=$(curl -fsS -m 5 "${OLLAMA_URL:-http://localhost:11434}/api/version" 2>/dev/null \
+                       | sed 's/.*"version" *: *"\([^"]*\)".*/\1/')
           ENV_BEFORE=$(systemctl show ollama -p Environment --value 2>/dev/null || true)
           UNIT=/etc/systemd/system/ollama.service
           if [ -f "$UNIT" ]; then
@@ -260,8 +265,29 @@ case "$OLLAMA_METHOD" in
           fi
           [ -n "$ENV_BEFORE" ] && info "environment before: $ENV_BEFORE"
 
-          curl -fsSL https://ollama.com/install.sh | sh && sudo systemctl restart ollama 2>/dev/null || true
-          ok "installer ran: $(ollama --version 2>/dev/null | head -1)"
+          curl -fsSL https://ollama.com/install.sh | sh
+          sudo systemctl daemon-reload 2>/dev/null || true
+          sudo systemctl restart ollama 2>/dev/null || warn "systemctl restart ollama failed"
+          sleep 3
+
+          # Did the RUNNING server actually change? A new file on disk proves nothing.
+          SRV_AFTER=$(curl -fsS -m 5 "${OLLAMA_URL:-http://localhost:11434}/api/version" 2>/dev/null \
+                      | sed 's/.*"version" *: *"\([^"]*\)".*/\1/')
+          BIN_PATH=$(command -v ollama 2>/dev/null || echo /usr/local/bin/ollama)
+          if [ -n "$SRV_AFTER" ] && [ "$SRV_AFTER" != "$SRV_BEFORE" ]; then
+            ok "server is now ${SRV_AFTER} (was ${SRV_BEFORE:-unknown})"
+          elif [ -n "$SRV_AFTER" ]; then
+            warn "server STILL reports ${SRV_AFTER} — the new binary is not the one running"
+            info "the binary on disk: $("$BIN_PATH" --version 2>/dev/null | head -1)"
+            info "what the service runs:"
+            systemctl cat ollama 2>/dev/null | grep -E '^ExecStart' | sed 's/^/    /'
+            info "other copies on PATH:"
+            command -v -a ollama 2>/dev/null | sed 's/^/    /' || true
+            info "if ExecStart names a different path than $BIN_PATH, that stale binary"
+            info "is what is serving; point the unit at the new one, or remove the old copy"
+          else
+            warn "no answer from the Ollama API — is the service running? systemctl status ollama"
+          fi
 
           ENV_AFTER=$(systemctl show ollama -p Environment --value 2>/dev/null || true)
           if [ "$ENV_BEFORE" != "$ENV_AFTER" ]; then

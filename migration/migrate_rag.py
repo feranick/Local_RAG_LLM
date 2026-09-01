@@ -34,7 +34,7 @@ Usage:
   python3 migrate_rag.py --verify            # after import: what's in place?
 """
 
-__version__ = "2026.08.03.2"
+__version__ = "2026.08.13.1"
 
 import os
 import re

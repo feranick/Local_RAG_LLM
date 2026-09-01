@@ -17,7 +17,7 @@ Optional: `pip install pymupdf` lets it also flag PDFs with no extractable text
 (scanned / image-only), which are the ones that need OCR.
 """
 
-__version__ = "2026.08.03.1"
+__version__ = "2026.08.13.1"
 
 import csv
 import sys

@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.03.3**
+**Version 2026.08.13.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -532,6 +532,137 @@ Then:
 ```bash
 python3 sync_folder.py --describe-figures            # combines with --prune / --ocr-fallback / --force
 RAG_FIGURE_MODEL=llava:13b python3 sync_folder.py --describe-figures   # larger LLaVA variant
+```
+
+### One model for chat and captions (recommended)
+
+Modern chat models are vision-capable, and using yours for captioning is usually
+better on both axes that matter:
+
+```ini
+# <lib>.conf
+FIGURE_MODEL      = qwen3.8:27b     # or gemma4:31b — any model with the vision capability
+FIGURE_KEEP_ALIVE = 30m
+FIGURE_TEMPERATURE = 0.2
+FIGURE_THINK      = false
+```
+
+- **Captions get better.** A 27B multimodal model reads axis labels, legends and
+  panel structure far more reliably than LLaVA 7B. It still shouldn't be trusted for
+  exact values — see the warning below, which applies to every vision model.
+- **Memory pressure drops.** Two models means Ollama holds ~18 GB of chat weights
+  *and* ~5 GB of LLaVA, or evicts one to load the other — and a figure run that
+  evicts your chat model makes the UI feel broken for whoever is using it. One shared
+  model can't thrash against itself.
+- **Each caption is slower.** 27B against 7B on the same page is roughly 2–4×. A
+  figure run is already the slow path, so measure on a handful of PDFs before
+  committing a whole library.
+
+Three settings exist because a chat model captions differently than a captioner:
+
+| Setting | Why |
+|---|---|
+| `FIGURE_THINK = false` (default) | thinking models reason before answering; for a caption that's several times the latency for output that gets discarded. Sent as `think: false`, and dropped automatically on builds that reject the field |
+| `FIGURE_TEMPERATURE = 0.2` | the dangerous failure here is a confidently invented axis label or number, and sampling is what produces those |
+| `FIGURE_KEEP_ALIVE = 30m` | Ollama unloads after 5 idle minutes by default; a pause or a slow page then costs an 18 GB reload |
+| `FIGURE_NUM_CTX = <same as your chat preset>` | see below — this is the one that isn't per-request |
+
+**Does this change my chats?** No. `think` and `temperature` are **per-request** fields:
+they live in the one HTTP call that describes one image, and are never written to the
+model, a Modelfile, or the server. Open WebUI's chat requests are separate calls that
+don't set them, so thinking and your preset's temperature behave exactly as before —
+during a figure run as much as after it. Prove it in one line while a run is going:
+
+```bash
+curl -s localhost:11434/api/generate \
+  -d '{"model":"qwen3.8:27b","prompt":"2+2? think first","stream":false}' \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("thinking present:", bool(d.get("thinking")))'
+```
+
+**`num_ctx` is the exception, and it's a memory trap rather than a behaviour one.**
+Context size is a *load-time* parameter: Ollama keys each loaded runner by it. If your
+chat preset pins `num_ctx = 32768` and figure calls inherit a different default, the
+same model is loaded **twice** — or unloaded and reloaded back and forth for the whole
+run, which is precisely the thrash that sharing one model was meant to avoid. Set
+`FIGURE_NUM_CTX` to the value your preset uses. The run says which case you're in:
+
+```
+[sync] num_ctx=32768 for figure calls — match your chat preset's value or the model loads twice
+```
+
+`ollama ps` is the check: **one** row for the model, not two.
+
+### Switching captioner on an existing library (`--recaption`)
+
+Captions live in **separate companion documents**, tracked per source file
+(`figures_id` for a PDF; for a standalone image the entry's own `remote_id`). So
+changing captioner does *not* require re-embedding anything — `--recaption` replaces
+only those caption docs. `--force` would re-upload and re-embed every paper in the
+library to achieve the same thing; don't use it for this.
+
+Each caption records the model that wrote it, which makes the switch inspectable and
+the run resumable. First, see what you have:
+
+```bash
+python3 sync_folder.py --config breakerspace.conf --status
+```
+
+```
+[sync] 412 caption doc(s), by the model that wrote them:
+[sync]       412  llava
+[sync] 412 could be redone with:  --recaption (only the caption docs; nothing is re-embedded)
+```
+
+Then switch the model and **time a sample** before committing hours:
+
+```ini
+# breakerspace.conf
+FIGURE_MODEL       = qwen3.8:27b
+FIGURE_NUM_CTX     = 32768      # same as your chat preset
+FIGURE_KEEP_ALIVE  = 30m
+FIGURE_DPI         = 200        # see below — cheapest quality lever there is
+```
+
+```bash
+python3 sync_folder.py --config breakerspace.conf --recaption --limit 5
+```
+
+Read those five descriptions in the UI, then do the rest — in the background, since it
+runs for hours:
+
+```bash
+nohup python3 sync_folder.py --config breakerspace.conf --recaption \
+      > recaption.log 2>&1 &
+python3 sync_folder.py --config breakerspace.conf --status   # from another terminal
+```
+
+How it behaves:
+
+| Situation | What happens |
+|---|---|
+| Caption already written by the current model | skipped — so an interrupted run resumes where it stopped |
+| Vision model fails on a document | the **old** caption is kept (built first, swapped second) and the file is reported; re-run to retry |
+| A PDF that has no figures this time | old caption doc removed, entry marked done |
+| Source file no longer on disk | skipped and counted; `--prune` is what removes its docs |
+| You want to redo up-to-date ones anyway | add `--force` |
+
+The source documents' own `remote_id`s are never touched, so retrieval over the text
+keeps working throughout — at any moment the collection has exactly one caption doc
+per source, old or new.
+
+**`FIGURE_DPI` is worth raising at the same time.** Whether the model can read an axis
+label is mostly a question of pixels, not parameters: 150 → 200 dpi often does more for
+caption accuracy than moving up a quantization level, at a fraction of the cost. 200 is
+a good default for journal-style figures; beyond ~250 the images get large enough to
+slow the model without adding legibility.
+
+The run states what it found before touching a file, and refuses rather than failing
+on every image several hundred files in:
+
+```
+[sync] figure model: qwen3.8:27b  [vision, thinking]
+[sync] thinking disabled for captions (FIGURE_THINK=true to allow it)
+[sync] keep_alive=30m — model stays resident between images
 ```
 
 ### Standalone images

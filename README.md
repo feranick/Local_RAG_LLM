@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.08.03.6**
+**Version 2026.08.13.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -78,6 +78,7 @@ python3 -m pip install dist/*.whl
 | `python3 management/new_rag_instance.py` | `new_rag_instance` |
 | `python3 migration/migrate_rag.py` | `migrate_rag` |
 | `python3 management/pin_notes.py` | `pin_notes` |
+| `python3 management/determinism_check.py` | `determinism_check` |
 
 The four shell scripts install under their own names too (`setup_local_rag.sh`,
 `update_local_rag.sh`, `uninstall_local_rag.sh`, `llm_stack_healthcheck.sh`), so

@@ -1,6 +1,6 @@
 # Full library rebuild — runbook
 
-**Version 2026.08.03.2**
+**Version 2026.08.13.1**
 
 Every command, in order, with a verification checkpoint after each stage. Don't
 move to the next stage until its check passes — that's the whole point of the

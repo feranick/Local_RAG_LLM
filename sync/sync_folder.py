@@ -42,9 +42,18 @@ environment variable, which overrides the config file:
                   standalone image files (png/jpg/tiff/…) the same way.
                   = --describe-figures. Needs PyMuPDF (pip install pymupdf) + a
                   vision model in Ollama.
-  RAG_FIGURE_MODEL  vision model tag (default: llava). NOTE: the DGX Spark's
-                  custom Ollama build does NOT support the 'mllama' architecture,
-                  so llama3.2-vision will not load there; llava does.
+  RAG_FIGURE_MODEL  vision model tag (default: llava). A vision-capable CHAT model
+                  (qwen3.8:27b, gemma4:31b) usually captions better AND avoids
+                  keeping a second model in memory — it is probably already loaded
+                  for chat. The run prints the model's capabilities and stops early
+                  if it cannot see. NOTE: some Ollama builds do not support the
+                  'mllama' architecture, so llama3.2-vision may not load; llava does.
+  RAG_FIGURE_TEMPERATURE  sampling temperature for captions (default 0.2)
+  RAG_FIGURE_THINK  "1"/"true" to let a thinking model reason before captioning
+                  (default off — it multiplies the time per image and the reasoning
+                  is thrown away)
+  RAG_FIGURE_KEEP_ALIVE  how long Ollama keeps the figure model loaded, e.g. "30m".
+                  Worth setting when it is also your chat model.
   RAG_OLLAMA_URL    Ollama base URL for figure calls (default: http://localhost:11434)
   RAG_FIGURE_DPI    page render DPI for the vision model (default: 150)
 
@@ -66,9 +75,13 @@ Usage:
   python3 sync_folder.py --describe-figures    # also index vision descriptions of plots
   python3 sync_folder.py --force               # re-sync everything (re-embed), no duplicates
   python3 sync_folder.py --status               # how far along? (safe during a run)
+  python3 sync_folder.py --recaption            # redo existing figure/image captions
+                                                # with the current FIGURE_MODEL only:
+                                                # documents are NOT re-embedded
+  python3 sync_folder.py --recaption --limit 5  # try five first, to time the change
 """
 
-__version__ = "2026.08.03.1"
+__version__ = "2026.08.13.1"
 
 import os
 import re
@@ -200,6 +213,24 @@ def cfg_flag(name, cli_on=None, cli_off=None, default=False):
     return (str(v).lower() in _TRUE) if v is not None else default
 
 
+def argv_int(flag, default=0):
+    """Value of a numeric CLI flag, e.g. --limit 20."""
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            try:
+                return int(sys.argv[i + 1])
+            except ValueError:
+                sys.exit(f"{flag} needs a number, got {sys.argv[i + 1]!r}")
+        sys.exit(f"{flag} needs a number")
+    return default
+
+
+# Redo existing captions with the current FIGURE_MODEL, touching ONLY the caption
+# docs. Separate from a normal run because --force would re-embed the whole library.
+RECAPTION = "--recaption" in sys.argv
+RECAPTION_LIMIT = argv_int("--limit", 0)
+
 BACKEND   = str(cfg("BACKEND", "openwebui")).lower()
 WATCH_DIR = pathlib.Path(cfg("WATCH_DIR", str(pathlib.Path.home() / "papers"))).expanduser()
 TARGET    = cfg("TARGET", "")          # knowledge id (Open WebUI) / workspace slug
@@ -228,9 +259,31 @@ CONVERT_LEGACY = cfg_flag("CONVERT_LEGACY", "--convert-legacy",
 
 # describe figures = render pages/images and index a vision-model description
 DESCRIBE_FIGURES = cfg_flag("DESCRIBE_FIGURES", "--describe-figures", "--no-describe-figures")
-FIGURE_MODEL = cfg("FIGURE_MODEL", "llava")     # loads on the Spark's Ollama build
+# A modern vision-capable CHAT model (qwen3.8:27b, gemma4:31b) is usually the better
+# choice than a dedicated captioner like llava — better captions, and it is probably
+# already resident for chat, so figure runs stop evicting it. Any model whose
+# capabilities include "vision" works; the run reports what it found before starting.
+FIGURE_MODEL = cfg("FIGURE_MODEL", "llava")
 OLLAMA_URL   = cfg("OLLAMA_URL", "http://localhost:11434")
 FIGURE_DPI   = int(cfg("FIGURE_DPI", 150))
+# Thinking models spend tokens reasoning before answering. For a caption that is pure
+# cost — often several times the latency, for output that gets discarded — so thinking
+# is disabled unless you ask for it. Ignored by models without the capability.
+FIGURE_THINK = cfg_flag("FIGURE_THINK", "--figure-think", "--no-figure-think", default=False)
+# Low temperature for captions: the failure mode that matters here is a confidently
+# invented axis label or number, and sampling is what produces those.
+FIGURE_TEMPERATURE = float(cfg("FIGURE_TEMPERATURE", 0.2))
+# Keep the model resident between images (e.g. "30m"). Worth setting when the figure
+# model is also your chat model: the default 5-minute idle unload otherwise reloads
+# ~18 GB whenever a slow page or a pause in the run exceeds it.
+FIGURE_KEEP_ALIVE = cfg("FIGURE_KEEP_ALIVE", "")
+# Context size for figure calls. Unlike `think` and `temperature` — which are per
+# request and affect nothing else — num_ctx is a LOAD-time parameter: Ollama keys a
+# loaded runner by it, so a chat preset pinned to 32768 and figure calls inheriting a
+# different default make the same model load twice, or reload back and forth for the
+# whole run. Set this to the SAME value your chat preset uses and one instance serves
+# both. Empty = send nothing (fine if the preset doesn't pin num_ctx either).
+FIGURE_NUM_CTX = cfg("FIGURE_NUM_CTX", "")
 
 # preflight low-text warning (on by default; never blocks an upload)
 PREFLIGHT = not cfg_flag("NO_PREFLIGHT", "--no-preflight", "--preflight")
@@ -311,9 +364,17 @@ DESCRIBE_FIGURES = false               # index vision descriptions of figures/im
 NO_PREFLIGHT     = false               # true = skip the low-text warning
 
 # --- figure descriptions -------------------------------------------------
+# A vision-capable CHAT model gives better captions than llava and is likely already
+# loaded, so figure runs stop evicting it: FIGURE_MODEL = qwen3.8:27b
 FIGURE_MODEL   = llava
 OLLAMA_URL     = http://localhost:11434
 FIGURE_DPI     = 150
+FIGURE_TEMPERATURE = 0.2     # low: invented axis labels are the failure that matters
+FIGURE_THINK   = false       # thinking costs latency and is discarded for a caption
+                             # (per-request — your chats keep thinking as configured)
+FIGURE_KEEP_ALIVE =          # e.g. 30m — keeps a big shared model resident
+FIGURE_NUM_CTX =             # set to the SAME num_ctx as your chat preset, or the
+                             # same model gets loaded twice (num_ctx is load-time)
 MIN_TEXT_CHARS = 400
 
 # --- server patience & progress ------------------------------------------
@@ -655,14 +716,87 @@ IMAGE_PROMPT = (
 )
 
 
+_VLM_CAPS = None          # None = not asked yet
+_VLM_THINK_FIELD_OK = True
+
+
+def vlm_caps(session):
+    """Capabilities of the figure model, from Ollama, cached for the run.
+
+    Recent Ollama reports these as e.g. ["completion", "vision", "thinking", "tools"].
+    Worth asking once: it turns "every image failed" into a single clear message
+    before the first page is rendered, and it says whether thinking must be switched
+    off — which is the difference between a 4-second caption and a 30-second one."""
+    global _VLM_CAPS
+    if _VLM_CAPS is None:
+        try:
+            r = session.post(f"{OLLAMA_URL}/api/show",
+                             json={"model": FIGURE_MODEL}, timeout=30)
+            caps = (r.json() or {}).get("capabilities") if r.ok else None
+            _VLM_CAPS = set(caps or [])
+        except Exception:
+            _VLM_CAPS = set()
+    return _VLM_CAPS
+
+
+def report_figure_model(session):
+    """Print what the figure model is and whether it can actually see. Returns False
+    only when Ollama is explicit that the model has no vision capability."""
+    caps = vlm_caps(session)
+    if not caps:
+        print(f"[sync] figure model: {FIGURE_MODEL} (capabilities unknown — older "
+              f"Ollama, or the model is not installed)")
+        return True
+    bits = [c for c in ("vision", "thinking", "tools") if c in caps]
+    print(f"[sync] figure model: {FIGURE_MODEL}  [{', '.join(bits) or 'text only'}]")
+    if "vision" not in caps:
+        print(f"[sync] {FIGURE_MODEL} has NO vision capability — it cannot describe "
+              f"images. Pick a vision model (e.g. qwen3.8:27b, gemma4:31b, llava) "
+              f"with FIGURE_MODEL.")
+        return False
+    if "thinking" in caps and not FIGURE_THINK:
+        print("[sync] thinking disabled for THESE requests only (per-request flag; your "
+              "chats are unaffected). FIGURE_THINK=true to allow it here too.")
+    if FIGURE_KEEP_ALIVE:
+        print(f"[sync] keep_alive={FIGURE_KEEP_ALIVE} — model stays resident between images")
+    if FIGURE_NUM_CTX:
+        print(f"[sync] num_ctx={FIGURE_NUM_CTX} for figure calls — match your chat "
+              f"preset's value or the model loads twice")
+    else:
+        print("[sync] num_ctx not set for figure calls: if your chat preset pins one, "
+              "set FIGURE_NUM_CTX to the same value to avoid reload thrash")
+    return True
+
+
 def _vlm_describe(session, png_b64, prompt):
     """Ask the local vision model (Ollama) to describe one image."""
-    r = session.post(f"{OLLAMA_URL}/api/generate",
-                     json={"model": FIGURE_MODEL, "prompt": prompt,
-                           "images": [png_b64], "stream": False},
-                     timeout=600)
+    global _VLM_THINK_FIELD_OK
+    opts = {"temperature": FIGURE_TEMPERATURE}
+    if FIGURE_NUM_CTX:
+        opts["num_ctx"] = int(FIGURE_NUM_CTX)
+    payload = {"model": FIGURE_MODEL, "prompt": prompt,
+               "images": [png_b64], "stream": False, "options": opts}
+    if FIGURE_KEEP_ALIVE:
+        payload["keep_alive"] = FIGURE_KEEP_ALIVE
+    thinking = "thinking" in vlm_caps(session)
+    if thinking and not FIGURE_THINK and _VLM_THINK_FIELD_OK:
+        payload["think"] = False
+
+    r = session.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=600)
+    # Older Ollama builds reject the `think` field outright. Drop it once and retry,
+    # rather than failing every image for the rest of the run.
+    if r.status_code == 400 and "think" in payload:
+        _VLM_THINK_FIELD_OK = False
+        payload.pop("think")
+        r = session.post(f"{OLLAMA_URL}/api/generate", json=payload, timeout=600)
     r.raise_for_status()
-    return r.json().get("response", "").strip()
+    d = r.json()
+    text = (d.get("response") or "").strip()
+    if not text:
+        # A thinking model that reasoned and returned nothing else lands here; the
+        # reasoning is in its own field and is not a caption.
+        text = (d.get("thinking") or "").strip()
+    return text
 
 
 # sidecar text files that may sit next to an image and hold its caption/metadata
@@ -946,6 +1080,10 @@ def attach_figures(session, src_pdf, key, files, add_fn):
     try:
         fig_id = add_fn(session, md_path)
         files[key]["figures_id"] = fig_id
+        # Which model wrote this caption. Recorded so --recaption can find the stale
+        # ones and skip the done ones, which is what makes a multi-hour re-caption of
+        # a big library resumable.
+        files[key]["figures_model"] = FIGURE_MODEL
         STATS["figure_docs"] += 1
         STATS["figure_pages"] += n
         print(f"[sync]   + figure descriptions added ({n} page(s) with figures)")
@@ -953,6 +1091,129 @@ def attach_figures(session, src_pdf, key, files, add_fn):
         print(f"[sync]   figure-description upload failed ({e})")
     finally:
         shutil.rmtree(md_path.parent, ignore_errors=True)
+
+
+def caption_inventory(state):
+    """[(path, entry, kind, model_that_wrote_it)] for everything with a caption."""
+    out = []
+    for key, e in (state.get("files") or {}).items():
+        p = pathlib.Path(key)
+        ext = p.suffix.lower()
+        if ext == ".pdf" and e.get("figures_id"):
+            out.append((p, e, "pdf", e.get("figures_model")))
+        elif ext in IMAGE_EXTS and e.get("remote_id"):
+            out.append((p, e, "image", e.get("desc_model")))
+    return out
+
+
+def cmd_recaption(session, state, add_fn, remove_fn, limit=0):
+    """Redo existing figure/image descriptions with the CURRENT figure model.
+
+    Why this exists as its own mode: --force would re-upload and re-embed every
+    document in the library to change captions that live in separate companion docs.
+    This touches only the caption docs — the papers themselves are never re-embedded,
+    so switching captioner costs vision time and nothing else.
+
+    Resumable by design: each caption records the model that wrote it, so a run that
+    stops after 300 files picks up at 301. --force redoes even up-to-date ones.
+    """
+    files = state["files"]
+    targets = caption_inventory(state)
+    if not targets:
+        print("[sync] no existing figure/image descriptions recorded in the state file")
+        print("[sync] (nothing to redo — a normal --describe-figures run creates them)")
+        return
+    by_model = collections.Counter(m or "unknown (pre-dates model tracking)"
+                                  for _, _, _, m in targets)
+    print(f"[sync] {len(targets)} caption doc(s) recorded:")
+    for m, n in by_model.most_common():
+        mark = "  <- current" if m == FIGURE_MODEL else ""
+        print(f"[sync]     {n:5}  {m}{mark}")
+
+    todo = targets if FORCE else [t for t in targets if t[3] != FIGURE_MODEL]
+    if not todo:
+        print(f"[sync] all captions already written by {FIGURE_MODEL} "
+              f"— use --force to redo them anyway")
+        return
+    if limit:
+        todo = todo[:limit]
+        print(f"[sync] --limit {limit}: doing the first {len(todo)} only "
+              f"(good for timing a sample before committing the library)")
+
+    print(f"[sync] re-captioning {len(todo)} document(s) with {FIGURE_MODEL}")
+    print("[sync] the source documents are NOT re-uploaded or re-embedded")
+    done = failed = missing = 0
+    t0 = time.time()
+    for i, (p, entry, kind, old_model) in enumerate(todo, 1):
+        _PROGRESS.update(idx=i, total=len(todo), file=p.name,
+                         file_started=time.time(), started=t0,
+                         config=str(CONFIG_PATH or ""))
+        beat("recaption")
+        if not p.is_file():
+            print(f"[sync] [{i}/{len(todo)}] {p.name}: source file is gone — skipped "
+                  f"(a --prune run removes its docs)")
+            missing += 1
+            continue
+        print(f"[sync] [{i}/{len(todo)}] {p.name} "
+              f"(was: {old_model or 'unknown'}) …")
+        try:
+            # Build the NEW caption first. If the vision model fails, the old caption
+            # is still in the collection — better a stale description than none.
+            if kind == "pdf":
+                md, n = build_figures_doc(session, p)
+            else:
+                md, n = build_image_doc(session, p), 1
+            if not md:
+                if kind == "pdf":
+                    print("[sync]   no figures found this time — removing the old "
+                          "description doc")
+                    try:
+                        remove_fn(session, entry["figures_id"])
+                    except Exception as e:
+                        print(f"[sync]   (could not remove the old doc: {e})")
+                    entry["figures_id"] = None
+                    entry["figures_model"] = FIGURE_MODEL
+                else:
+                    print("[sync]   could not describe the image — old doc kept")
+                    failed += 1
+                continue
+            try:
+                old_id = entry.get("figures_id") if kind == "pdf" else entry.get("remote_id")
+                if old_id:
+                    try:
+                        remove_fn(session, old_id)
+                    except Exception as e:
+                        print(f"[sync]   old doc not removed ({e}) — continuing; "
+                              f"check for a duplicate in the UI")
+                new_id = add_fn(session, md)
+                if kind == "pdf":
+                    entry["figures_id"] = new_id
+                    entry["figures_model"] = FIGURE_MODEL
+                    print(f"[sync]   + new descriptions ({n} page(s) with figures)")
+                else:
+                    entry["remote_id"] = new_id
+                    entry["desc_model"] = FIGURE_MODEL
+                    print("[sync]   + new image description")
+                done += 1
+            finally:
+                shutil.rmtree(md.parent, ignore_errors=True)
+        except requests.HTTPError as e:
+            print(f"[sync]   FAILED: {e}")
+            failed += 1
+        except Exception as e:
+            print(f"[sync]   FAILED: {type(e).__name__}: {e}")
+            failed += 1
+        maybe_checkpoint(state, every=5, seconds=120)
+        if i % 5 == 0 and i < len(todo):
+            el = time.time() - t0
+            print(f"[sync] --- {i}/{len(todo)} ({i/len(todo)*100:.0f}%) — "
+                  f"{el/60:.0f} min elapsed, ~{(len(todo)-i)*(el/i)/60:.0f} min left "
+                  f"at {el/i:.0f}s/doc ---")
+    save_state(state)
+    print(f"\n[sync] re-captioned {done}, failed {failed}, source missing {missing}")
+    print(f"[sync] took {(time.time()-t0)/60:.0f} min")
+    if failed:
+        print("[sync] failures keep their previous description — re-run to retry them")
 
 
 def build_image_doc(session, img_path):
@@ -1041,6 +1302,21 @@ def cmd_status():
         print(f"[sync] {ghosts} tracked entr(ies) no longer on disk "
               f"(--prune removes them from the collection)")
 
+    # Caption inventory by model: the answer to "how far through the re-caption am I"
+    # and "which of these were written by the old captioner".
+    caps = caption_inventory(state)
+    if caps:
+        counts = collections.Counter(m or "unknown (pre-dates model tracking)"
+                                    for _, _, _, m in caps)
+        print(f"[sync] {len(caps)} caption doc(s), by the model that wrote them:")
+        for m, n in counts.most_common():
+            mark = "  <- current FIGURE_MODEL" if m == FIGURE_MODEL else ""
+            print(f"[sync]     {n:5}  {m}{mark}")
+        stale = sum(n for m, n in counts.items() if m != FIGURE_MODEL)
+        if stale:
+            print(f"[sync] {stale} could be redone with:  --recaption "
+                  f"(only the caption docs; nothing is re-embedded)")
+
     # Liveness comes from the heartbeat + the PID, NOT from the state file's age:
     # a single big PDF under --describe-figures can legitimately take an hour, and
     # judging by the state timestamp alone would call a healthy run dead.
@@ -1120,6 +1396,12 @@ def main():
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {API_KEY}"})
 
+    # Check the figure model BEFORE any work: a wrong FIGURE_MODEL otherwise shows up
+    # as an error on every image, hundreds of files into a run.
+    if (DESCRIBE_FIGURES or RECAPTION) and not report_figure_model(session):
+        die("figure descriptions requested but the model cannot see images — "
+            "fix FIGURE_MODEL, or drop --describe-figures/--recaption")
+
     state = load_state()
     # if the backend/target changed, stored remote ids no longer apply
     if state.get("backend") not in (None, BACKEND) or state.get("target") not in (None, TARGET):
@@ -1127,6 +1409,10 @@ def main():
               "(old remote ids can't be reused).")
         state = {"files": {}}
     state["backend"], state["target"] = BACKEND, TARGET
+
+    if RECAPTION:
+        cmd_recaption(session, state, add_fn, remove_fn, limit=RECAPTION_LIMIT)
+        return
     files = state.setdefault("files", {})
     _LIVE_STATE["state"] = state    # so progress survives a crash or Ctrl-C
 
@@ -1215,7 +1501,10 @@ def main():
                     continue
                 try:
                     remote_id = add_fn(session, md)
-                    files[key] = {"hash": digest, "remote_id": remote_id}
+                    # for a standalone image the uploaded doc IS the description, so
+                    # the model that wrote it is recorded on the entry itself
+                    files[key] = {"hash": digest, "remote_id": remote_id,
+                                  "desc_model": FIGURE_MODEL}
                 finally:
                     shutil.rmtree(md.parent, ignore_errors=True)
                 updated += is_update

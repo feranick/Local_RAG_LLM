@@ -132,18 +132,25 @@ GEN_MODEL=""
 # exact match on a plain preference like "gemma4:26b" fails and the check reports the
 # preferred model as missing when it is in fact installed. Try exact, then prefix.
 TEST_ESC=$(printf '%s' "$TEST_MODEL" | sed 's/[.[\*^$+?(){}|]/\\&/g')
+MATCH_KIND="fallback"
 if echo "$MODEL_NAMES" | grep -qx "$TEST_MODEL"; then
-  GEN_MODEL="$TEST_MODEL"
+  GEN_MODEL="$TEST_MODEL"; MATCH_KIND="exact"
 else
   GEN_MODEL=$(echo "$MODEL_NAMES" | grep -E "^${TEST_ESC}([-:]|$)" | head -1)
-  [ -z "$GEN_MODEL" ] && \
+  if [ -n "$GEN_MODEL" ]; then
+    MATCH_KIND="variant"
+  else
     GEN_MODEL=$(echo "$MODEL_NAMES" | grep -viE "$EMBED_PAT|$VISION_PAT" | head -1)
+  fi
 fi
 
 section "3. Generation test (${GEN_MODEL:-none available})"
 
 if [ -n "$GEN_MODEL" ]; then
-  [ "$GEN_MODEL" != "$TEST_MODEL" ] && warn "preferred '$TEST_MODEL' not installed — testing '$GEN_MODEL' instead"
+  case "$MATCH_KIND" in
+    variant)  echo "      preferred '$TEST_MODEL' resolved to installed variant '$GEN_MODEL'" ;;
+    fallback) warn "preferred '$TEST_MODEL' not installed — testing '$GEN_MODEL' instead" ;;
+  esac
   REQ="{\"model\":\"$GEN_MODEL\",\"prompt\":\"Reply with exactly one word: OK\",\"stream\":false}"
   START=$(date +%s)
   RESP=$(curl -fsS --max-time 180 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)
@@ -151,10 +158,22 @@ if [ -n "$GEN_MODEL" ]; then
   if echo "$RESP" | grep -q '"response"'; then
     TEXT=$(echo "$RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("response","").strip())' 2>/dev/null)
     [ -z "$TEXT" ] && TEXT="(empty)"
-    ok "$GEN_MODEL generated a response in $((END-START))s"
+    COLD=$((END-START))
+    ok "$GEN_MODEL generated a response in ${COLD}s"
     echo "      model said: ${TEXT}"
-    if [ "$((END-START))" -gt 20 ]; then
-      warn "that was slow — check 'ollama ps' shows 100% GPU (not a CPU split / cold load)"
+    # The first request usually includes loading ~20 GB of weights, so timing it says
+    # nothing about inference speed. Time a SECOND request, with the model resident:
+    # that is the number worth warning about.
+    if [ "$COLD" -gt 10 ]; then
+      START2=$(date +%s)
+      curl -fsS --max-time 120 "$OLLAMA_URL/api/generate" -d "$REQ" >/dev/null 2>&1
+      END2=$(date +%s); WARM=$((END2-START2))
+      if [ "$WARM" -gt 10 ]; then
+        warn "still ${WARM}s with the model loaded — check 'ollama ps': PROCESSOR should"
+        warn "  read 100% GPU, and a very large CONTEXT costs memory and prefill time"
+      else
+        echo "      (${COLD}s included the model load; warm request: ${WARM}s)"
+      fi
     fi
   else
     bad "$GEN_MODEL failed to generate — it may not load on this build (check: journalctl -u ollama)"
