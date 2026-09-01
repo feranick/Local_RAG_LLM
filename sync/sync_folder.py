@@ -1376,6 +1376,27 @@ def collections_from_payload(payload):
     return None
 
 
+def count_files(obj):
+    """How many files a knowledge object holds, or None if the shape doesn't say.
+
+    Three shapes in the wild: `files: [...]`, the older `data: {file_ids: [...]}`,
+    and a plain count field. The LIST endpoint often omits all of them — it returns
+    summaries — so a 0 from the list view means "not reported here", not "empty".
+    Reporting that as 0 is how a healthy 2666-file collection looks deleted."""
+    if not isinstance(obj, dict):
+        return None
+    f = obj.get("files")
+    if isinstance(f, list):
+        return len(f)
+    d = obj.get("data")
+    if isinstance(d, dict) and isinstance(d.get("file_ids"), list):
+        return len(d["file_ids"])
+    for k in ("file_count", "files_count", "num_files"):
+        if isinstance(obj.get(k), int):
+            return obj[k]
+    return None
+
+
 def cmd_discover():
     """Rebuild a lost config by asking the server and the state files what exists.
 
@@ -1454,31 +1475,60 @@ def cmd_discover():
     for c in items:
         cid = c.get("id")
         name = c.get("name")
-        n_remote = len((c.get("files") or []))
+        # the list view usually omits the file array; ask the detail endpoint
+        n_remote = count_files(c)
+        if n_remote is None:
+            detail = None
+            try:
+                r = session.get(f"{BASE_URL}/api/v1/knowledge/{cid}", timeout=60)
+                if r.ok and "application/json" in r.headers.get("Content-Type", ""):
+                    detail = r.json()
+            except Exception:
+                pass
+            n_remote = count_files(detail)
         st = states.get(cid)
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", (name or "library")).strip("_").lower()
         print(f"[sync] collection '{name}'  id={cid}")
-        print(f"[sync]   server reports {n_remote} file(s) attached")
+        print(f"[sync]   server reports "
+              + (f"{n_remote} file(s) attached" if n_remote is not None
+                 else "an unknown number of files (this build's API does not say; "
+                      "trust the UI count)"))
         if st:
-            agree = "matches" if st["n"] == n_remote else "DIFFERS from"
-            print(f"[sync]   state file {st['file'].name}: {st['n']} tracked — {agree} "
-                  f"the server")
+            if n_remote is None:
+                print(f"[sync]   state file {st['file'].name}: {st['n']} tracked")
+            else:
+                agree = "matches" if st["n"] == n_remote else "DIFFERS from"
+                print(f"[sync]   state file {st['file'].name}: {st['n']} tracked — "
+                      f"{agree} the server")
             print(f"[sync]   {st['captions']} caption doc(s) recorded")
-            print(f"[sync]   --- paste into <name>.conf ---")
-            print(f"BACKEND    = openwebui")
-            print(f"BASE_URL   = {BASE_URL}")
-            print(f"TARGET     = {cid}")
-            print(f"WATCH_DIR  = {st['watch'] or '<your documents folder>'}")
-            print(f"KEY_FILE   = {KEY_FILE}")
-            print(f"STATE_FILE = {st['file']}")
-            print(f"[sync]   ---------------------------------")
         else:
-            print("[sync]   no state file recorded for this id. If you sync it with a "
-                  "fresh state file, every document is treated as new.")
+            print("[sync]   NO state file recorded for this id — so a sync would treat "
+                  "every document as new.")
+            print("[sync]   That is recoverable: Open WebUI rejects duplicate content, "
+                  "and this")
+            print("[sync]   tool records those rejections, so the run rebuilds the state "
+                  "file instead")
+            print("[sync]   of uploading a second copy. Use a NEW state file name and "
+                  "watch the first")
+            print("[sync]   few files report 'already in the collection'.")
+        # Always print a paste-able config, whether or not a state file was matched —
+        # the case with no state file is exactly the one that needs a config written.
+        conf_name = f"{slug}.conf"
+        print(f"[sync]   --- save as {conf_name} ---")
+        print("BACKEND    = openwebui")
+        print(f"BASE_URL   = {BASE_URL}")
+        print(f"TARGET     = {cid}")
+        print(f"WATCH_DIR  = {(st or {}).get('watch') or '<the folder holding these documents>'}")
+        print(f"KEY_FILE   = {KEY_FILE}")
+        print(f"STATE_FILE = {st['file'] if st else pathlib.Path.home() / ('.rag_sync_state_' + slug + '.json')}")
+        print("[sync]   ------------------------------")
         print()
-    print("[sync] verify with:  python3 sync_folder.py --config <name>.conf --status")
+    print("[sync] next: write a block above to a file, then check it BEFORE syncing:")
+    print("  python3 sync_folder.py --config <name>.conf --status")
     print("[sync] '0 to go' means the state file is the right one. A number close to the")
-    print("[sync] whole library means it is NOT — fix that before syncing, or you get a")
-    print("[sync] second copy of everything.")
+    print("[sync] whole library means the state does not describe this collection — with")
+    print("[sync] a lost state file that is expected, and the duplicate-rejection path")
+    print("[sync] above is how it repairs itself.")
 
 
 def main():
