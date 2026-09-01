@@ -1354,6 +1354,28 @@ def cmd_status():
     print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")
 
 
+def collections_from_payload(payload):
+    """The collection list out of whatever /api/v1/knowledge/ returned.
+
+    Builds differ: some return a bare JSON array, others wrap it — `{"data": [...]}`,
+    `{"items": [...], "total": n}` (pagination). Assuming one shape made a wrapped
+    response look like "you have no collections", which sent the diagnosis off after
+    the API key instead of the parsing. Returns [] for a genuinely empty list and
+    None when no list can be found at all — those mean different things."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for k in ("data", "items", "results", "knowledge", "collections"):
+            v = payload.get(k)
+            if isinstance(v, list):
+                return v
+        # any list of objects that look like collections
+        for v in payload.values():
+            if isinstance(v, list) and (not v or isinstance(v[0], dict)):
+                return v
+    return None
+
+
 def cmd_discover():
     """Rebuild a lost config by asking the server and the state files what exists.
 
@@ -1406,23 +1428,23 @@ def cmd_discover():
         print("[sync]   no ~/.rag_sync_state*.json found — a fresh sync would re-upload "
               "everything, which Open WebUI will mostly reject as duplicate content")
 
-    # The list may arrive bare or wrapped, and "no collections" must be reported
-    # rather than silently skipped: an empty list from a 200 response means the key
-    # is valid but sees nothing, which is a different problem from a bad key.
-    items = cols.get("data") if isinstance(cols, dict) else cols
-    if not isinstance(items, list):
-        print(f"[sync] unexpected response shape from /api/v1/knowledge/: "
-              f"{type(cols).__name__} — cannot list collections")
-        items = []
+    items = collections_from_payload(cols)
     print()
+    if items is None:
+        keys = ", ".join(sorted(cols)) if isinstance(cols, dict) else type(cols).__name__
+        print(f"[sync] could not find a collection list in the response from "
+              f"/api/v1/knowledge/")
+        print(f"[sync] top-level keys were: {keys}")
+        print("[sync] see the raw shape with (copy this whole line):")
+        print(f"  curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" {BASE_URL}/api/v1/knowledge/ | head -c 400")
+        return
     if not items:
         print("[sync] this key can see ZERO collections on this instance.")
         print("[sync] The key is valid (the request succeeded) — it just belongs to a")
         print("[sync] different account than the one that owns them, or the collections")
         print("[sync] are private to another user. Collections are per-user in Open WebUI.")
-        print("[sync] Check whose key this is:")
-        print(f"[sync]   curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" \\")
-        print(f"[sync]        {BASE_URL}/api/v1/auths/ | python3 -m json.tool")
+        print("[sync] Check whose key this is (copy each line whole, without a prefix):")
+        print(f"  curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" {BASE_URL}/api/v1/auths/ | python3 -m json.tool")
         print("[sync] Then, logged in as the owner in the UI: Settings → Account → API")
         print(f"[sync] keys → create one, and write it to {KEY_FILE} (chmod 600).")
         print("[sync] Other key files present:")
