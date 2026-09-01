@@ -81,7 +81,7 @@ Usage:
   python3 sync_folder.py --recaption --limit 5  # try five first, to time the change
 """
 
-__version__ = "2026.08.13.1"
+__version__ = "2026.09.01.1"
 
 import os
 import re
@@ -1304,7 +1304,7 @@ def cmd_status():
 
     # Caption inventory by model: the answer to "how far through the re-caption am I"
     # and "which of these were written by the old captioner".
-    caps = caption_inventory(state)
+    caps = caption_inventory(st)
     if caps:
         counts = collections.Counter(m or "unknown (pre-dates model tracking)"
                                     for _, _, _, m in caps)
