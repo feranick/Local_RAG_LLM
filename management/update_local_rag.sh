@@ -132,7 +132,9 @@ recreate_ollama-vision() {
 # values.
 run_args_from_inspect() {
   local c="$1" ref cj ij
-  ref="$(img_ref "$c")" || return 1
+  # The caller may have resolved an untagged image back to a pullable reference;
+  # honour that so the recreate uses the NEW image rather than the orphaned id.
+  ref="${2:-$(img_ref "$c")}" || return 1
   cj="$($DOCKER inspect "$c" 2>/dev/null)" || return 1
   ij="$($DOCKER image inspect "$ref" 2>/dev/null)" || ij='[]'
   CONTAINER_JSON="$cj" IMAGE_JSON="$ij" NAME="$c" REF="$ref" python3 - <<'PY'
@@ -173,11 +175,43 @@ PY
 }
 
 recreate_generic() {
-  local c="$1" args
-  args="$(run_args_from_inspect "$c")" || { warn "$c: could not read its configuration"; return 1; }
+  local c="$1" ref="${2:-}" args
+  args="$(run_args_from_inspect "$c" "$ref")" || { warn "$c: could not read its configuration"; return 1; }
   $DOCKER rm -f "$c" >/dev/null
   eval "$DOCKER $args" >/dev/null
 }
+
+# ---- what version is actually being SERVED ----
+#
+# "up to date" here means the local image matches the registry. It does not prove the
+# running container serves that image, and the browser's copy of the UI can report an
+# older version from cache for either reason. Asking the container's own API removes
+# both doubts.
+first_host_port() {
+  $DOCKER inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}} {{end}}{{end}}' \
+    "$1" 2>/dev/null | awk '{print $1}'
+}
+served_version() {           # $1 container -> prints the version, or nothing
+  local p; p="$(first_host_port "$1")"; [ -n "$p" ] || return 1
+  curl -fsS -m 5 "http://localhost:${p}/api/config" 2>/dev/null \
+    | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("version") or "")
+except Exception: pass' 2>/dev/null
+}
+image_version() {            # $1 image ref -> a SEMVER label, or nothing
+  # The label is whatever the build set: releases carry "0.11.3", but the :main build
+  # labels itself "main". Comparing a served "0.11.3" against a label of "main" would
+  # report a mismatch on a perfectly current container, so anything that isn't a
+  # version number is treated as "unknown" rather than as evidence.
+  local v
+  v="$($DOCKER image inspect "$1" \
+       -f '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null)"
+  case "$v" in
+    v[0-9]*.[0-9]*|[0-9]*.[0-9]*) printf '%s' "${v#v}" ;;
+    *) : ;;
+  esac
+}
+is_openwebui() { case "$(img_ref "$1")" in *open-webui*) return 0 ;; *) return 1 ;; esac; }
 
 # ---- update one container ----
 update_container() {
@@ -187,6 +221,32 @@ update_container() {
     info "$c not installed — skipping"
     return
   fi
+  # A container can reference an image that no longer carries a tag: once a newer
+  # image is pulled, `:main` moves to it and the old one is left untagged, so this
+  # reads back as a bare id ("6d8efb3fc96c") or "sha256:…". There is nothing to pull
+  # from that, and left unhandled the container silently keeps running old code —
+  # which is exactly how a second instance sat on 0.11.0 while the first went to
+  # 0.11.3. Map it back to the image the container is obviously an instance of.
+  case "$ref" in
+    sha256:*|*[!0-9a-f]*) : ;;                     # a real reference — use as is
+    *)
+      case "$c" in
+        *open-webui*|*openwebui*)
+          info "$c: its image is untagged (id ${ref}) — the tag moved after an update"
+          ref="ghcr.io/open-webui/open-webui:main" ;;
+        *anythingllm*)
+          info "$c: its image is untagged (id ${ref})"
+          ref="mintplexlabs/anythingllm:latest" ;;
+        *)
+          warn "$c runs an untagged image (${ref}) — cannot tell what to pull; skipping"
+          return ;;
+      esac ;;
+  esac
+  case "$ref" in
+    sha256:*)
+      warn "$c is pinned to a digest (${ref}) — leaving it alone"
+      return ;;
+  esac
   info "checking $c ($ref)…"
   if ! $DOCKER pull "$ref" >/dev/null 2>&1; then
     warn "$c: could not pull $ref (network?) — skipping"
@@ -194,6 +254,14 @@ update_container() {
   fi
   if [ "$(running_imgid "$c")" = "$(ref_imgid "$ref")" ] && [ "$FORCE_RECREATE" -eq 0 ]; then
     ok "$c is up to date"
+    if is_openwebui "$c"; then
+      local sv iv; sv="$(served_version "$c")"; iv="$(image_version "$ref")"
+      [ -n "$sv" ] && info "  serving version ${sv}$( [ -n "$iv" ] && echo " (image says ${iv})" )"
+      if [ -n "$sv" ] && [ -n "$iv" ] && [ "$sv" != "$iv" ]; then
+        warn "  the running container does NOT match the pulled image — recreate it:"
+        warn "    ./update_local_rag.sh --force-recreate"
+      fi
+    fi
     return
   fi
   if [ "$FORCE_RECREATE" -eq 1 ] && [ "$(running_imgid "$c")" = "$(ref_imgid "$ref")" ]; then
@@ -210,7 +278,7 @@ update_container() {
     "recreate_${c}"
   else
     info "$c: no built-in recipe — recreating from its current configuration"
-    recreate_generic "$c" || return
+    recreate_generic "$c" "$ref" || return
   fi
   for n in $nets; do
     $DOCKER network connect "$n" "$c" >/dev/null 2>&1 && info "  reattached $c to network '$n'" || true
@@ -218,6 +286,19 @@ update_container() {
   # confirm it came back up
   if [ "$($DOCKER inspect -f '{{.State.Status}}' "$c" 2>/dev/null)" = "running" ]; then
     ok "$c updated and running"
+    if is_openwebui "$c"; then
+      local sv=""
+      for _ in 1 2 3 4 5 6 7 8 9 10; do      # it needs a few seconds to serve
+        sv="$(served_version "$c")"; [ -n "$sv" ] && break; sleep 3
+      done
+      if [ -n "$sv" ]; then
+        info "  now serving version ${sv}"
+        info "  if the browser still shows an older version, that is its cache:"
+        info "  DevTools → Application → Storage → Clear site data, then reload"
+      else
+        info "  (still starting — check http://localhost:$(first_host_port "$c") shortly)"
+      fi
+    fi
   else
     warn "$c updated but not running — check: $DOCKER logs $c"
   fi
@@ -229,16 +310,27 @@ UPDATES_AVAILABLE=0
 # name — second library instances are created with names this script cannot guess
 # (open-webui-breakerspace, …), and skipping them means the UI keeps announcing an
 # update that the updater never applies.
-EXTRA_CONTAINERS="$($DOCKER ps -a --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
-  | awk -F'\t' '$2 ~ /open-webui|anythingllm/ {print $1}' \
-  | grep -vxE 'open-webui|anythingllm' | tr '\n' ' ')"
+# Match on the NAME as well as the image: a second instance can be running an image
+# reference that doesn't contain "open-webui" (a digest pin, a local retag, a mirror),
+# and it was the image-only match that let a live 0.11.0 instance on port 3002 stay
+# invisible to this updater. Also split on whitespace rather than a literal tab, since
+# `docker ps --format` tab handling varies between versions.
+EXTRA_CONTAINERS="$($DOCKER ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null \
+  | awk '$1 ~ /open-webui|anythingllm|openwebui/ || $2 ~ /open-webui|anythingllm/ {print $1}' \
+  | grep -vxE 'open-webui|anythingllm' | sort -u | tr '\n' ' ')"
 ALL_CONTAINERS="open-webui anythingllm tika ollama-vision ${EXTRA_CONTAINERS}"
 
 # ---- summary / confirm ----
 echo "${BOLD}Update local RAG stack${RESET}"
 echo "  containers: open-webui, anythingllm, tika (if present), ollama-vision (if present)"
-[ -n "${EXTRA_CONTAINERS// /}" ] && \
+if [ -n "${EXTRA_CONTAINERS// /}" ]; then
   echo "  additional instances found: ${EXTRA_CONTAINERS}"
+else
+  # Say so explicitly. Silence here previously looked identical to "there are none",
+  # while a second instance was running and being skipped.
+  echo "  no additional instances detected — if a second UI answers on another port,"
+  echo "  check:  ${DOCKER} ps -a --format '{{.Names}}\t{{.Image}}\t{{.Ports}}'"
+fi
 [ "$FORCE_RECREATE" -eq 1 ] && echo "  + --force-recreate: recreate even if the image is unchanged"
 [ "$PULL_MODELS" -eq 1 ]    && echo "  + re-pull installed Ollama models to latest tags"
 [ "$INCLUDE_OLLAMA" -eq 1 ] && echo "  ${RED}+ update Ollama via the generic installer (see warning)${RESET}"
