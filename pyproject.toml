@@ -30,7 +30,7 @@ name = "local-rag-llm"
 # so the version is written in normalised form here to match the wheel filename.
 # The scripts all carry the un-normalised form in __version__:
 #     __version__ = "2026.09.01.1"
-version = "2026.9.5.1"
+version = "2026.9.5.2"
 description = "Self-hosted RAG stack for Linux workstations: Ollama + Open WebUI, folder sync, hardware-aware model management and machine migration"
 readme = "README.md"
 requires-python = ">=3.9"

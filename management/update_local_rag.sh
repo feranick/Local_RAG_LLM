@@ -153,9 +153,18 @@ for cport, binds in (hc.get("PortBindings") or {}).items():
         ip = b.get("HostIp") or ""
         pre = f"{ip}:" if ip and ip != "0.0.0.0" else ""
         a += ["-p", f"{pre}{b.get('HostPort','')}:{cport.split('/')[0]}"]
+# Variables that describe the IMAGE, not your configuration. Subtracting by exact
+# key=value is not enough for these: the old image and the new one both set
+# WEBUI_BUILD_VERSION, to *different* commit hashes, so the old value looks like a
+# user setting and gets pinned into a container built from the new image — which then
+# reports the build it is not. Never carry these across a recreate; the new image
+# supplies its own.
+IMAGE_OWNED = {"WEBUI_BUILD_VERSION", "PYTHON_VERSION", "PYTHON_SHA256",
+               "PYTHON_GET_PIP_URL", "PYTHON_GET_PIP_SHA256", "GPG_KEY",
+               "PATH", "LANG", "HOME"}
 image_env = set((img[0]["Config"].get("Env") or []) if img else [])
 for e in (cfg.get("Env") or []):
-    if e in image_env or e.startswith("PATH="):
+    if e in image_env or e.split("=", 1)[0] in IMAGE_OWNED:
         continue
     a += ["-e", e]
 for m in (c.get("Mounts") or []):
