@@ -183,25 +183,65 @@ else
 fi
 
 # -----------------------------------------------------------------
-section "4. Open WebUI  ($OPENWEBUI_URL)"
+# EVERY Open WebUI instance, not just the first. A second library runs in its own
+# container on its own port (new_rag_instance.py), and checking one hardcoded name
+# means a dead — or silently un-updated — second instance passes the healthcheck.
+# Discovery matches the container NAME as well as the image, because an image whose
+# tag has moved shows up as a bare id.
+owui_containers() {
+  $DOCKER ps -a --format '{{.Names}} {{.Image}}' 2>/dev/null \
+    | awk '$1 ~ /open-webui|openwebui/ || $2 ~ /open-webui/ {print $1}' | sort -u
+}
+first_host_port() {
+  $DOCKER inspect -f '{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostPort}} {{end}}{{end}}' \
+    "$1" 2>/dev/null | awk '{print $1}'
+}
 
-STATE=$($DOCKER inspect -f '{{.State.Status}}' "$OPENWEBUI_CONTAINER" 2>/dev/null)
-[ "$STATE" = "running" ] && ok "container '$OPENWEBUI_CONTAINER' is running" \
-                         || bad "container '$OPENWEBUI_CONTAINER' state: ${STATE:-not found}"
-if curl -fsS --max-time 5 "$OPENWEBUI_URL" >/dev/null 2>&1; then
-  ok "Open WebUI responding at $OPENWEBUI_URL"
-else
-  bad "Open WebUI NOT responding at $OPENWEBUI_URL"
-fi
-# can the Open WebUI container reach Ollama?
-if [ -n "$($DOCKER ps -q -f name=^/${OPENWEBUI_CONTAINER}$ 2>/dev/null)" ]; then
-  if $DOCKER exec "$OPENWEBUI_CONTAINER" curl -fsS --max-time 5 \
-        http://host.docker.internal:11434/api/tags >/dev/null 2>&1; then
-    ok "Open WebUI container CAN reach Ollama (host.docker.internal)"
+INSTANCES="$(owui_containers)"
+[ -z "$INSTANCES" ] && INSTANCES="$OPENWEBUI_CONTAINER"
+N_INST=$(echo "$INSTANCES" | grep -c .)
+
+section "4. Open WebUI  (${N_INST} instance(s))"
+
+for C in $INSTANCES; do
+  STATE=$($DOCKER inspect -f '{{.State.Status}}' "$C" 2>/dev/null)
+  PORT=$(first_host_port "$C")
+  URL="http://localhost:${PORT:-8080}"
+  echo "    --- $C  ${PORT:+(port $PORT)}"
+  if [ "$STATE" = "running" ]; then
+    ok "container '$C' is running"
   else
-    bad "Open WebUI container CANNOT reach Ollama — check OLLAMA_HOST=0.0.0.0:11434"
+    bad "container '$C' state: ${STATE:-not found}"
+    continue
   fi
-fi
+  if curl -fsS --max-time 5 "$URL" >/dev/null 2>&1; then
+    VER=$(curl -fsS --max-time 5 "$URL/api/config" 2>/dev/null \
+          | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("version") or "")
+except Exception: pass' 2>/dev/null)
+    ok "responding at $URL${VER:+  (version $VER)}"
+  else
+    bad "NOT responding at $URL"
+  fi
+  if $DOCKER exec "$C" curl -fsS --max-time 5 \
+        http://host.docker.internal:11434/api/tags >/dev/null 2>&1; then
+    ok "'$C' CAN reach Ollama (host.docker.internal)"
+  else
+    bad "'$C' CANNOT reach Ollama — check OLLAMA_HOST=0.0.0.0:11434"
+  fi
+done
+
+# Different versions across instances usually means one was missed by an update —
+# they share an Ollama and are expected to move together.
+VERSIONS=$(for C in $INSTANCES; do
+             P=$(first_host_port "$C"); [ -n "$P" ] || continue
+             curl -fsS --max-time 5 "http://localhost:$P/api/config" 2>/dev/null \
+               | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("version") or "")
+except Exception: pass' 2>/dev/null
+           done | sort -u | grep -c .)
+[ "${VERSIONS:-0}" -gt 1 ] && \
+  warn "instances are running DIFFERENT versions — run: ./update_local_rag.sh"
 
 # -----------------------------------------------------------------
 section "5. AnythingLLM  ($ANYTHINGLLM_URL)"
@@ -227,7 +267,9 @@ fi
 
 # -----------------------------------------------------------------
 section "6. Restart policies (survives reboot?)"
-for c in "$OPENWEBUI_CONTAINER" "$ANYTHINGLLM_CONTAINER"; do
+# every discovered instance, not just the first — a second library that doesn't come
+# back after a reboot is exactly the failure this section exists to catch
+for c in $INSTANCES "$ANYTHINGLLM_CONTAINER"; do
   POL=$($DOCKER inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$c" 2>/dev/null)
   case "$POL" in
     always|unless-stopped) ok "$c restart policy: $POL" ;;
