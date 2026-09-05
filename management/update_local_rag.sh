@@ -121,6 +121,64 @@ recreate_ollama-vision() {
     -v ollama_vision:/root/.ollama ollama/ollama >/dev/null
 }
 
+# ---- generic recreate, for containers this script has no recipe for ----
+#
+# A second Open WebUI instance (new_rag_instance.py) has a name this script never
+# knew about, so it was silently skipped: the UI kept offering an update that the
+# updater appeared to apply — to a different container. Rather than hardcode more
+# names, rebuild the `docker run` from what the container is actually configured
+# with. Environment variables the IMAGE sets are subtracted, so only the ones you
+# passed are carried over, and a new image's own defaults are not pinned to the old
+# values.
+run_args_from_inspect() {
+  local c="$1" ref cj ij
+  ref="$(img_ref "$c")" || return 1
+  cj="$($DOCKER inspect "$c" 2>/dev/null)" || return 1
+  ij="$($DOCKER image inspect "$ref" 2>/dev/null)" || ij='[]'
+  CONTAINER_JSON="$cj" IMAGE_JSON="$ij" NAME="$c" REF="$ref" python3 - <<'PY'
+import json, os, shlex
+c = json.loads(os.environ["CONTAINER_JSON"])[0]
+img = json.loads(os.environ["IMAGE_JSON"] or "[]")
+name, ref = os.environ["NAME"], os.environ["REF"]
+hc, cfg = c["HostConfig"], c["Config"]
+a = ["run", "-d", "--name", name]
+rp = (hc.get("RestartPolicy") or {}).get("Name") or ""
+if rp and rp != "no":
+    a += ["--restart", rp if rp != "on-failure"
+          else "on-failure:%d" % (hc["RestartPolicy"].get("MaximumRetryCount", 0))]
+for cport, binds in (hc.get("PortBindings") or {}).items():
+    for b in binds or []:
+        ip = b.get("HostIp") or ""
+        pre = f"{ip}:" if ip and ip != "0.0.0.0" else ""
+        a += ["-p", f"{pre}{b.get('HostPort','')}:{cport.split('/')[0]}"]
+image_env = set((img[0]["Config"].get("Env") or []) if img else [])
+for e in (cfg.get("Env") or []):
+    if e in image_env or e.startswith("PATH="):
+        continue
+    a += ["-e", e]
+for m in (c.get("Mounts") or []):
+    src = m.get("Name") or m.get("Source")
+    a += ["-v", f"{src}:{m['Destination']}" + ("" if m.get("RW", True) else ":ro")]
+for h in (hc.get("ExtraHosts") or []):
+    a += ["--add-host", h]
+for u in (hc.get("Ulimits") or []):
+    a += ["--ulimit", f"{u['Name']}={u['Soft']}:{u['Hard']}"]
+for cap in (hc.get("CapAdd") or []):
+    a += ["--cap-add", cap]
+if hc.get("DeviceRequests"):
+    a += ["--gpus", "all"]
+a.append(ref)
+print(" ".join(shlex.quote(x) for x in a))
+PY
+}
+
+recreate_generic() {
+  local c="$1" args
+  args="$(run_args_from_inspect "$c")" || { warn "$c: could not read its configuration"; return 1; }
+  $DOCKER rm -f "$c" >/dev/null
+  eval "$DOCKER $args" >/dev/null
+}
+
 # ---- update one container ----
 update_container() {
   local c="$1"
@@ -148,7 +206,12 @@ update_container() {
   fi
   # remember extra networks (e.g. rag-net) to reattach after recreate
   local nets; nets="$(extra_networks "$c")"
-  "recreate_${c}"
+  if declare -f "recreate_${c}" >/dev/null 2>&1; then
+    "recreate_${c}"
+  else
+    info "$c: no built-in recipe — recreating from its current configuration"
+    recreate_generic "$c" || return
+  fi
   for n in $nets; do
     $DOCKER network connect "$n" "$c" >/dev/null 2>&1 && info "  reattached $c to network '$n'" || true
   done
@@ -162,9 +225,20 @@ update_container() {
 
 UPDATES_AVAILABLE=0
 
+# Every ADDITIONAL Open WebUI / AnythingLLM container, found by image rather than by
+# name — second library instances are created with names this script cannot guess
+# (open-webui-breakerspace, …), and skipping them means the UI keeps announcing an
+# update that the updater never applies.
+EXTRA_CONTAINERS="$($DOCKER ps -a --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
+  | awk -F'\t' '$2 ~ /open-webui|anythingllm/ {print $1}' \
+  | grep -vxE 'open-webui|anythingllm' | tr '\n' ' ')"
+ALL_CONTAINERS="open-webui anythingllm tika ollama-vision ${EXTRA_CONTAINERS}"
+
 # ---- summary / confirm ----
 echo "${BOLD}Update local RAG stack${RESET}"
 echo "  containers: open-webui, anythingllm, tika (if present), ollama-vision (if present)"
+[ -n "${EXTRA_CONTAINERS// /}" ] && \
+  echo "  additional instances found: ${EXTRA_CONTAINERS}"
 [ "$FORCE_RECREATE" -eq 1 ] && echo "  + --force-recreate: recreate even if the image is unchanged"
 [ "$PULL_MODELS" -eq 1 ]    && echo "  + re-pull installed Ollama models to latest tags"
 [ "$INCLUDE_OLLAMA" -eq 1 ] && echo "  ${RED}+ update Ollama via the generic installer (see warning)${RESET}"
@@ -177,7 +251,7 @@ fi
 
 # ---- containers ----
 step "Containers"
-for c in open-webui anythingllm tika ollama-vision; do
+for c in $ALL_CONTAINERS; do
   update_container "$c"
 done
 
