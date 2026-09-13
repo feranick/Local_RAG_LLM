@@ -38,7 +38,7 @@ Usage:
   python3 manage_models.py --set-default llama3.3:70b --instance http://localhost:3000
 """
 
-__version__ = "2026.08.13.1"
+__version__ = "2026.09.01.1"
 
 import os
 import re
@@ -281,8 +281,24 @@ def cmd_tags(name, show_all):
         info(f"check the name — see: {CATALOG}/library/{name}/tags")
         return
     if not tags:
-        warn("no tags parsed — the model name may be wrong, or the site changed layout")
-        info(f"open {CATALOG}/library/{name}/tags to check")
+        # Almost always a name that isn't a library name: "deepseek" is a family,
+        # the models are deepseek-r1, deepseek-v4-flash, … Searching for it turns a
+        # dead end into the list the user was actually after.
+        warn(f"no model called '{name}' in the library")
+        try:
+            found = [m for m in catalog_search(name) if name.lower() in m["name"].lower()]
+        except Exception:
+            found = []
+        if found:
+            info("did you mean one of these?")
+            for m in found[:12]:
+                sizes = " ".join(m["sizes"][:6])
+                caps = ", ".join(c for c in m["caps"] if c != "tools")
+                print(f"      {m['name']:26} {sizes:24} {caps}")
+            info(f"then:  python3 manage_models.py --tags <name>")
+        else:
+            info(f"try a search:  python3 manage_models.py --browse {name}")
+            info(f"or open {CATALOG}/library/{name}/tags")
         return
     have = {m.get("name", "") for m in installed(soft=True)}
     # Tags sharing a digest are the same build under different names. Showing that
@@ -319,6 +335,17 @@ def cmd_tags(name, show_all):
         mark = f"{G}✔{X}" if full in have else " "
         size = "?" if not gb else (f"{gb:.1f} GB" if gb < 10 else f"{gb:.0f} GB")
         print(f"  {mark} {full:28} {size:>8}  {t['ctx']:>6}  {', '.join(bits)}")
+    if hidden and hidden == len(tags):
+        # Some models are published ONLY as cloud tags: they run on Ollama's servers
+        # and are billed, and there is nothing to download. Saying "3 tags hidden"
+        # under an empty table reads like a filter bug rather than the real answer.
+        bad(f"every tag of '{name}' is cloud- or Apple-only — it CANNOT run on this "
+            f"machine")
+        info("cloud tags execute on Ollama's servers (account + usage charges), which")
+        info("also means your documents would leave this machine — the opposite of the")
+        info("point of this stack")
+        info(f"see them anyway with:  python3 manage_models.py --tags {name} --all")
+        return
     if hidden:
         info(f"{hidden} MLX/cloud tag(s) hidden — use --all to see them")
         info("MLX tags are Apple builds. Note the format-named ones (-nvfp4, -mxfp8)")
