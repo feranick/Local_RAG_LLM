@@ -535,6 +535,24 @@ notes that retrieval can actually find* in `sync/README.md`.
 Notes that must apply in **every** answer, regardless of retrieval, belong in the
 preset's system prompt instead — that's `pin_notes.py`.
 
+**Already have notes that live only in the web UI?** Bring them down first, or the
+folder-first workflow will upload duplicates beside them:
+
+```bash
+python3 sync/sync_folder.py --config ~/lab_notes.conf --pull
+python3 sync/sync_folder.py --config ~/lab_notes.conf --status   # expect 0 to go
+```
+
+`--pull` downloads the collection's files into `WATCH_DIR` and records them against
+the remote ids they already have, so nothing is re-uploaded. A local file with the
+same name but different content is never overwritten — the server's copy lands beside
+it. Details in `sync/README.md`.
+
+With two instances, keep one notes folder and one config per instance — same
+`WATCH_DIR`, **different `STATE_FILE`** — so the same notes are retrievable in both
+UIs. Capture where you actually chat: a note synced only to the papers instance is
+invisible in conversations held on the other one.
+
 ### Follow-up suggestions, titles and tags: the task model
 
 The clickable follow-up questions under each answer are **not** produced by the chat

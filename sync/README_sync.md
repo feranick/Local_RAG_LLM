@@ -1,6 +1,6 @@
 # Folder Sync for Local RAG — `sync_folder.py`
 
-**Version 2026.08.13.1**
+**Version 2026.9.15.1**
 
 Keeps a local folder in sync with a RAG knowledge base — an AnythingLLM workspace or an Open WebUI collection. It hashes each file, uploads only new/changed ones, and (optionally) mirrors deletions, OCRs text-less PDFs, and describes figures/images with a vision model.
 
@@ -17,6 +17,8 @@ This is the companion to the main stack (setup, health check, update, uninstall)
 - **Describe figures (`--describe-figures`):** render PDF pages and standalone images and index a vision-model description of each, so plots/figures become retrievable.
 
 > **Don't mix methods on one collection.** The script tracks what *it* uploaded; documents you add by hand in the GUI are invisible to it. If you both drag files into the GUI and sync the same folder, you'll get duplicates, and `--prune` won't touch the GUI-added ones. Pick one method per collection.
+>
+> Already in that situation? **`--pull` adopts a GUI-filled collection**: it downloads the files into `WATCH_DIR` and records them as already synced, so you can switch to the folder-first workflow without duplicating anything. See [Adopting a collection that was filled through the UI](#adopting-a-collection-that-was-filled-through-the-ui---pull).
 
 ---
 
@@ -449,6 +451,53 @@ under `tmux`/`screen`.
 
 ---
 
+## Adopting a collection that was filled through the UI (`--pull`)
+
+The warning above — *don't mix methods on one collection* — leaves an obvious gap:
+what if a collection already exists and its documents were typed or dragged in
+through the web UI, with nothing on disk? That's the one arrangement this tool can't
+maintain. It tracks files on disk, so those documents are invisible to it: a sync
+would upload local copies as **new** files, and `--prune` would delete what it didn't
+put there.
+
+`--pull` adopts them instead. It downloads every file attached to `TARGET` into
+`WATCH_DIR` and records each one in the state file **against the remote id it already
+has**, so the folder and the collection agree and the next sync has nothing to do:
+
+```bash
+python3 sync_folder.py --config ~/lab_notes.conf --pull --dry-run   # see the plan
+python3 sync_folder.py --config ~/lab_notes.conf --pull
+python3 sync_folder.py --config ~/lab_notes.conf --status           # expect 0 to go
+```
+
+```
+[sync] 3 file(s) attached to 'LabNotes'
+[sync] [1/3] sample-storage.md differs from the local copy — saved as sample-storage-from-server.md
+[sync] downloaded 3, already identical 0
+[sync] state recorded in /home/you/.rag_sync_state_lab_notes.json
+```
+
+What it does about awkward cases:
+
+| Case | Behaviour |
+|---|---|
+| Local file with the same name but different content | **never overwritten** — the server's version is saved as `<name>-from-server.md` for you to reconcile |
+| Local file already identical | left alone, still recorded as synced |
+| Build that doesn't serve `/files/<id>/content` | falls back to the extracted text on the file object |
+| A filename containing a path | reduced to its basename — the server can't write outside the folder |
+
+After a pull, **the folder is the source of truth**: edit notes in your editor, keep
+them in git, and sync. If `--status` reports anything other than `0 to go` right
+afterwards, that number is exactly the count of files that exist locally but not in
+the collection — a normal sync adds them.
+
+Pulling the same folder from *two* instances merges both collections into one folder,
+after which syncing each config pushes the union to both. That's usually what you
+want for a shared set of notes, but it is a merge — look at the folder before syncing
+back.
+
+---
+
 ## Re-syncing / resetting
 
 The script skips files whose content hasn't changed. To deliberately re-upload/re-embed papers you've already synced, use `--force`:
@@ -690,6 +739,11 @@ For a heavier-duty "search papers *by* their visual content" system (page-as-ima
 | `--no-preflight` | `RAG_NO_PREFLIGHT=1` | disable the pre-upload low-text warning |
 | `--no-convert-legacy` | `RAG_CONVERT_LEGACY=0` | don't convert `.doc`/`.ppt`/`.xls` before upload (on by default; needs libreoffice or antiword) |
 | `--status` | — | print how far along this library is, then exit (safe during a run) |
+| `--pull` | — | download this collection's files into `WATCH_DIR` and record them as already synced (adopt a GUI-filled collection) |
+| `--wipe` | — | empty THIS collection — detach *and* delete its file objects — and clear its state file, for a clean re-index |
+| `--recaption` | — | redo existing figure/image descriptions with the current `FIGURE_MODEL`; documents are not re-embedded |
+| `--discover` | — | no config? list collections and state files and print a config to paste |
+| `--limit N` | — | with `--recaption`, stop after N documents (time a sample first) |
 | `--allow-parallel` | — | permit a second concurrent run against the same library (normally refused) |
 | — | `RAG_PROGRESS_EVERY` | progress/ETA line every N files (default `25`, `0` = off) |
 | — | `RAG_MIN_TEXT_CHARS` | HTML low-text threshold in chars (default 400) |

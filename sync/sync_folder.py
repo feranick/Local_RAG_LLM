@@ -82,6 +82,11 @@ Usage:
                                                 # with the current FIGURE_MODEL only:
                                                 # documents are NOT re-embedded
   python3 sync_folder.py --recaption --limit 5  # try five first, to time the change
+  python3 sync_folder.py --config X.conf --pull  # collection filled through the UI?
+                                                # download its files into WATCH_DIR and
+                                                # record them as already synced, so the
+                                                # folder becomes the source of truth
+                                                # without re-uploading anything
   python3 sync_folder.py --config X.conf --wipe  # empty THIS collection (detach +
                                                 # delete its file objects) and clear
                                                 # its state, for a clean re-index.
@@ -89,7 +94,7 @@ Usage:
                                                 # add --dry-run to see the plan first
 """
 
-__version__ = "2026.09.01.1"
+__version__ = "2026.9.15.1"
 
 import os
 import re
@@ -1130,6 +1135,103 @@ def caption_inventory(state):
     return out
 
 
+def cmd_pull(session, state, dry_run=False):
+    """Download a collection's files into WATCH_DIR and record them as already synced.
+
+    For a collection that was filled through the UI — notes typed or dragged in — the
+    documents exist only on the server. That is the one arrangement this tool cannot
+    maintain: it tracks files on disk, so those documents are invisible to it, a sync
+    would upload local copies as NEW files, and --prune would delete what it did not
+    put there.
+
+    This adopts them instead: fetch each file, write it to WATCH_DIR, and record its
+    hash against the remote id it already has. Afterwards `--status` reports "0 to go"
+    — the collection and the folder agree, and from then on the folder is the source
+    of truth, editable, greppable and backed up like anything else.
+    """
+    if not TARGET:
+        die("no TARGET in the config — nothing to pull from")
+    print(f"[sync] pulling collection {TARGET} into {WATCH_DIR}")
+    try:
+        r = session.get(f"{BASE_URL}/api/v1/knowledge/{TARGET}", timeout=120)
+        r.raise_for_status()
+        detail = r.json()
+    except Exception as e:
+        die(f"could not read the collection: {e}")
+
+    files = [f for f in (detail.get("files") or []) if isinstance(f, dict)]
+    if not files:
+        ids = [i for i in ((detail.get("data") or {}).get("file_ids") or [])
+               if isinstance(i, str)]
+        files = [{"id": i} for i in ids]
+    if not files:
+        print("[sync] the collection reports no files — nothing to pull")
+        return
+
+    print(f"[sync] {len(files)} file(s) attached to '{detail.get('name')}'")
+    WATCH_DIR.mkdir(parents=True, exist_ok=True)
+    got = skipped = failed = 0
+    for i, f in enumerate(files, 1):
+        fid = f.get("id")
+        meta = f.get("meta") if isinstance(f.get("meta"), dict) else {}
+        name = (meta.get("name") or f.get("filename") or f.get("name")
+                or f"{fid}.md")
+        name = pathlib.Path(str(name)).name          # never let the server pick a path
+        dest = WATCH_DIR / name
+
+        body = None
+        try:
+            rr = session.get(f"{BASE_URL}/api/v1/files/{fid}/content", timeout=120)
+            if rr.ok and "text/html" not in rr.headers.get("Content-Type", ""):
+                body = rr.content
+        except Exception:
+            body = None
+        if body is None:
+            # Older builds expose the extracted text on the file object instead.
+            try:
+                rr = session.get(f"{BASE_URL}/api/v1/files/{fid}", timeout=120)
+                d = rr.json() if rr.ok else {}
+                text = ((d.get("data") or {}).get("content")
+                        or (d.get("meta") or {}).get("content") or "")
+                body = text.encode() if text else None
+            except Exception:
+                body = None
+        if body is None:
+            print(f"[sync] [{i}/{len(files)}] {name}: could not download — skipped")
+            failed += 1
+            continue
+
+        if dest.exists() and dest.read_bytes() == body:
+            skipped += 1
+        elif dest.exists():
+            # Same name, different content: keep both rather than overwrite work.
+            dest = WATCH_DIR / f"{dest.stem}-from-server{dest.suffix}"
+            print(f"[sync] [{i}/{len(files)}] {name} differs from the local copy — "
+                  f"saved as {dest.name}")
+        if dry_run:
+            print(f"[sync] [{i}/{len(files)}] would write {dest}")
+            continue
+        if not dest.exists() or dest.read_bytes() != body:
+            dest.write_bytes(body)
+            got += 1
+        # Record it as synced: same hash, and the remote id it ALREADY has, so the
+        # next run has nothing to do instead of uploading a second copy.
+        state["files"][str(dest)] = {"hash": file_hash(dest), "remote_id": fid}
+        maybe_checkpoint(state, every=20, seconds=60)
+
+    if dry_run:
+        print("[sync] --dry-run: nothing written")
+        return
+    save_state(state)
+    print(f"\n[sync] downloaded {got}, already identical {skipped}"
+          + (f", failed {failed}" if failed else ""))
+    print(f"[sync] state recorded in {STATE_FILE}")
+    print("[sync] confirm the folder and the collection now agree:")
+    print(f"  python3 {pathlib.Path(__file__).name} --config <conf> --status")
+    print("[sync] expect '0 to go'. From here the FOLDER is the source of truth —")
+    print("[sync] edit the notes locally and sync; new ones can come from capture_notes.py")
+
+
 def cmd_wipe(session, assume_yes=False, dry_run=False):
     """Empty THIS collection and clear its state file, so the next sync is a clean add.
 
@@ -1703,6 +1805,10 @@ def main():
               "(old remote ids can't be reused).")
         state = {"files": {}}
     state["backend"], state["target"] = BACKEND, TARGET
+
+    if "--pull" in sys.argv:
+        cmd_pull(session, state, dry_run="--dry-run" in sys.argv)
+        return
 
     if "--wipe" in sys.argv:
         cmd_wipe(session, assume_yes="--yes" in sys.argv,
