@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.08.13.1**
+**Version 2026.9.15.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -30,6 +30,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `uninstall_local_rag.sh` | Removes the stack. Safe by default (keeps data); `--purge-data` wipes everything including models. |
 | `migrate_rag.py` | Move the whole stack to another machine: archives the docker volumes (collections **and** vectors), documents and sync files, then restores them and rewrites the absolute paths so nothing gets re-indexed or duplicated. See `MIGRATION_RUNBOOK.md`. |
 | `pin_notes.py` | Mirrors a folder of short notes into a model preset's **system prompt**, so local practice applies in every chat without depending on retrieval. Replaces only its own marked block, so hand-written prompt text survives; `--dry-run` shows a diff, `--clear` removes it. |
+| `capture_notes.py` | Turns things you learn in a chat into lab notes the RAG can retrieve. Write `Remember: …` in a conversation and harvest it later, or capture straight from the terminal. Only your own words are ever written — never the model's — and a capture that resembles an existing note asks you to append, replace or keep both rather than quietly adding a second, contradicting note. |
 | `determinism_check.py` | Asks the same question N times through the API and reports how much the answer moves — text, cited sources and the numbers in it. `--compare` runs the set twice, as configured and with sampling pinned, so you can see whether a settings change actually bought repeatability. Writes a keepable artifact folder. |
 | `manage_models.py` | Browse, add, test, list, remove or set the default **LLM** on a running stack. `--browse`/`--tags` read the available models live from the Ollama library; every add is followed by a real load test, since a model can download and still fail to run on this Ollama build. |
 | `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
@@ -79,6 +80,7 @@ python3 -m pip install dist/*.whl
 | `python3 migration/migrate_rag.py` | `migrate_rag` |
 | `python3 management/pin_notes.py` | `pin_notes` |
 | `python3 management/determinism_check.py` | `determinism_check` |
+| `python3 management/capture_notes.py` | `capture_notes` |
 
 The four shell scripts install under their own names too (`setup_local_rag.sh`,
 `update_local_rag.sh`, `uninstall_local_rag.sh`, `llm_stack_healthcheck.sh`), so
@@ -477,6 +479,61 @@ Full Context injects the content verbatim in **every** message, regardless of to
 calling or Top K — so it can't be out-ranked, and it works identically on every chat
 model. The trade-off is that it always occupies context, so keep this collection to a
 handful of short notes; anything longer belongs in the retrieved library.
+
+### Keeping what you learn in a chat (`capture_notes.py`)
+
+Conversations surface knowledge the corpus doesn't have — where something is kept,
+which trick works on which instrument, what a number actually means. Unless it's
+written down it dies with the chat. This captures it as a markdown note in the notes
+folder, so the next sync makes it retrievable like any other document.
+
+Two ways in, and both write **your own words**:
+
+```bash
+# 1. In any chat, start a line with the marker:
+#       Remember: the Ti target needs 15 min pre-sputter after venting
+#    Then harvest, reviewing each one:
+capture_notes --harvest --since 7 --instance http://localhost:3000
+
+# 2. Straight from the terminal, when you already know:
+capture_notes --note "Argon valve sticks below 18 C" \
+              --topic "argon valve" --also-called "argon line, gas valve"
+
+# then index them
+python3 sync/sync_folder.py --config ~/lab_notes.conf
+```
+
+**Only human turns are ever captured.** A `Remember:` written by the *model* is
+ignored, and nothing is summarised or paraphrased — the note is the text you typed.
+That restriction is the point rather than a limitation: model output that lands in
+the corpus comes back as a retrieved "source" in later answers, complete with a
+citation chip, and there is no way afterwards to tell an invention from a fact.
+
+**Captures never go straight into the collection.** `sync_folder` tracks files on
+disk, so a document created through the API alone is untracked, and a later `--prune`
+deletes it as an orphan. The file is the source of truth; the sync follows.
+
+**A capture that resembles an existing note stops and asks.** Two notes that
+disagree are worse than a missing note — retrieval returns both and the model picks
+one, silently:
+
+```
+! this looks related to an existing note (71% similar): sample-storage.md
+  shared terms: cabinet, cross, polished, sections
+
+  existing: Polished cross-sections are stored in cabinet B, second shelf
+  new:      The polished cross-section samples moved to cabinet B shelf 3
+
+  [a] append (dated)  [r] replace  [n] new note  [s] skip
+```
+
+Re-running the harvest is safe: every captured line is recorded, so nothing is
+written twice. The harvest prompts for an `Also called:` alias line per note, which
+is the moment you actually know which words someone would search with — see *Writing
+notes that retrieval can actually find* in `sync/README.md`.
+
+Notes that must apply in **every** answer, regardless of retrieval, belong in the
+preset's system prompt instead — that's `pin_notes.py`.
 
 ### Follow-up suggestions, titles and tags: the task model
 
