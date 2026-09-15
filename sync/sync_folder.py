@@ -1188,6 +1188,67 @@ def files_of(detail):
     return []
 
 
+def collection_files(session):
+    """Every file attached to TARGET, trying each place a build might keep them.
+
+    Not over-engineering: on one instance `/api/v1/knowledge/<id>` carries a populated
+    `files` array; on another (same 0.11.3) the very same call returns `"files": null`
+    while the UI happily lists 17 documents — the association is exposed elsewhere.
+    So ask each candidate in turn and use the first that actually yields a list.
+
+    Returns (files, attempts) where attempts records what every endpoint said, so a
+    failure produces a diagnosis instead of another guess.
+    """
+    attempts = []
+    candidates = [
+        ("detail",          f"/api/v1/knowledge/{TARGET}"),
+        ("detail/files",    f"/api/v1/knowledge/{TARGET}/files"),
+        ("detail/file/list", f"/api/v1/knowledge/{TARGET}/file/list"),
+        ("list",            "/api/v1/knowledge/list"),
+        ("index",           "/api/v1/knowledge/"),
+    ]
+    for label, path in candidates:
+        url = f"{BASE_URL}{path}"
+        try:
+            r = session.get(url, timeout=120)
+        except Exception as e:
+            attempts.append((label, path, f"{type(e).__name__}: {e}", 0))
+            continue
+        if not r.ok:
+            attempts.append((label, path, f"HTTP {r.status_code}", 0))
+            continue
+        if "application/json" not in r.headers.get("Content-Type", ""):
+            attempts.append((label, path, "not JSON (SPA page — no such route)", 0))
+            continue
+        try:
+            payload = r.json()
+        except ValueError:
+            attempts.append((label, path, "malformed JSON", 0))
+            continue
+
+        # A list endpoint answers with every collection; pick ours out of it.
+        if label in ("list", "index"):
+            items = payload if isinstance(payload, list) else (
+                payload.get("data") or payload.get("items") or [])
+            payload = next((c for c in items
+                            if isinstance(c, dict) and c.get("id") == TARGET), None)
+            if payload is None:
+                attempts.append((label, path, "collection not present in the list", 0))
+                continue
+
+        files = files_of(payload) if isinstance(payload, dict) else \
+            [e for e in ({"id": x.get("id") or x.get("file_id"),
+                          "name": ((x.get("meta") or {}).get("name")
+                                   or x.get("filename") or x.get("name"))}
+                         for x in payload if isinstance(x, dict)) if e["id"]] \
+            if isinstance(payload, list) else []
+        attempts.append((label, path, "ok" if files else "no file list in the response",
+                         len(files)))
+        if files:
+            return files, attempts
+    return [], attempts
+
+
 def cmd_pull(session, state, dry_run=False):
     """Download a collection's files into WATCH_DIR and record them as already synced.
 
@@ -1205,26 +1266,22 @@ def cmd_pull(session, state, dry_run=False):
     if not TARGET:
         die("no TARGET in the config — nothing to pull from")
     print(f"[sync] pulling collection {TARGET} into {WATCH_DIR}")
-    try:
-        r = session.get(f"{BASE_URL}/api/v1/knowledge/{TARGET}", timeout=120)
-        r.raise_for_status()
-        detail = r.json()
-    except Exception as e:
-        die(f"could not read the collection: {e}")
-
-    files = files_of(detail)
+    files, attempts = collection_files(session)
     if not files:
-        print("[sync] found no file list in the collection's response — nothing pulled")
-        print(f"[sync] top-level keys were: {', '.join(sorted(detail)) or '(none)'}")
-        print("[sync] the UI may still show documents; this is a parsing problem, not")
-        print("[sync] an empty collection. See the raw shape with:")
+        print("[sync] could not find this collection's file list on any known route.")
+        print("[sync] what each endpoint answered:")
+        for label, path, note, n in attempts:
+            print(f"[sync]   {label:16} {path:44} {note}")
+        print("[sync] The UI listing documents while these come back empty means the")
+        print("[sync] association is exposed somewhere this build does not share with")
+        print("[sync] the others. Nothing was written. Send me the line above plus:")
         print(f"  curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" "
-              f"{BASE_URL}/api/v1/knowledge/{TARGET} | head -c 600")
+              f"{BASE_URL}/api/v1/files/ | head -c 800")
         return
-
-    inner = detail.get("data") if isinstance(detail.get("data"), dict) else {}
-    coll_name = detail.get("name") or inner.get("name") or "(unnamed)"
-    print(f"[sync] {len(files)} file(s) attached to '{coll_name}'")
+    used = next((a for a in attempts if a[3]), None)
+    if used:
+        print(f"[sync] file list came from {used[1]}")
+    print(f"[sync] {len(files)} file(s) attached to this collection")
     WATCH_DIR.mkdir(parents=True, exist_ok=True)
     got = skipped = failed = 0
     for i, f in enumerate(files, 1):
