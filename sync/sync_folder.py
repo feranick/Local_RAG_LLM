@@ -1135,6 +1135,59 @@ def caption_inventory(state):
     return out
 
 
+def files_of(detail):
+    """[{id, name}] for a knowledge object, whatever shape the build returns.
+
+    Seen in the wild, all meaning the same thing:
+        {"files": [{"id": …, "meta": {"name": …}}, …]}
+        {"files": ["id", "id", …]}
+        {"data": {"file_ids": ["id", …]}}
+        {"file_ids": [...]}                     top level
+        {"data": {…the knowledge object…}}      the whole thing wrapped once
+    Guessing one of these and reporting "no files" for the others is how a
+    collection with 17 documents in the UI looks empty from here."""
+    if not isinstance(detail, dict):
+        return []
+    # unwrap a single-level envelope before looking for anything
+    for k in ("data", "knowledge", "result"):
+        inner = detail.get(k)
+        if isinstance(inner, dict) and ("files" in inner or "file_ids" in inner):
+            detail = {**detail, **inner}
+            break
+
+    def entry(x):
+        if isinstance(x, str):
+            return {"id": x, "name": None}
+        if isinstance(x, dict):
+            fid = x.get("id") or x.get("file_id")
+            if not fid:
+                return None
+            meta = x.get("meta") if isinstance(x.get("meta"), dict) else {}
+            return {"id": fid,
+                    "name": meta.get("name") or x.get("filename") or x.get("name")}
+        return None
+
+    for key in ("files", "file_ids"):
+        v = detail.get(key)
+        if isinstance(v, list):
+            got = [e for e in (entry(x) for x in v) if e]
+            if got:
+                return got
+    v = (detail.get("data") or {}).get("file_ids") if isinstance(detail.get("data"), dict) else None
+    if isinstance(v, list):
+        got = [e for e in (entry(x) for x in v) if e]
+        if got:
+            return got
+    # last resort: any nested list of objects that carry an id
+    for v in detail.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict) and \
+                ("id" in v[0] or "file_id" in v[0]):
+            got = [e for e in (entry(x) for x in v) if e]
+            if got:
+                return got
+    return []
+
+
 def cmd_pull(session, state, dry_run=False):
     """Download a collection's files into WATCH_DIR and record them as already synced.
 
@@ -1159,23 +1212,36 @@ def cmd_pull(session, state, dry_run=False):
     except Exception as e:
         die(f"could not read the collection: {e}")
 
-    files = [f for f in (detail.get("files") or []) if isinstance(f, dict)]
+    files = files_of(detail)
     if not files:
-        ids = [i for i in ((detail.get("data") or {}).get("file_ids") or [])
-               if isinstance(i, str)]
-        files = [{"id": i} for i in ids]
-    if not files:
-        print("[sync] the collection reports no files — nothing to pull")
+        print("[sync] found no file list in the collection's response — nothing pulled")
+        print(f"[sync] top-level keys were: {', '.join(sorted(detail)) or '(none)'}")
+        print("[sync] the UI may still show documents; this is a parsing problem, not")
+        print("[sync] an empty collection. See the raw shape with:")
+        print(f"  curl -s -H \"Authorization: Bearer $(cat {KEY_FILE})\" "
+              f"{BASE_URL}/api/v1/knowledge/{TARGET} | head -c 600")
         return
 
-    print(f"[sync] {len(files)} file(s) attached to '{detail.get('name')}'")
+    inner = detail.get("data") if isinstance(detail.get("data"), dict) else {}
+    coll_name = detail.get("name") or inner.get("name") or "(unnamed)"
+    print(f"[sync] {len(files)} file(s) attached to '{coll_name}'")
     WATCH_DIR.mkdir(parents=True, exist_ok=True)
     got = skipped = failed = 0
     for i, f in enumerate(files, 1):
-        fid = f.get("id")
-        meta = f.get("meta") if isinstance(f.get("meta"), dict) else {}
-        name = (meta.get("name") or f.get("filename") or f.get("name")
-                or f"{fid}.md")
+        fid = f["id"]
+        name = f.get("name")
+        if not name:
+            # id-only listing: ask the file object for its real filename
+            d = None
+            try:
+                rr = session.get(f"{BASE_URL}/api/v1/files/{fid}", timeout=60)
+                d = rr.json() if rr.ok else None
+            except Exception:
+                d = None
+            if isinstance(d, dict):
+                meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
+                name = meta.get("name") or d.get("filename") or d.get("name")
+            name = name or f"{fid}.md"
         name = pathlib.Path(str(name)).name          # never let the server pick a path
         dest = WATCH_DIR / name
 
