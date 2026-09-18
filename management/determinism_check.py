@@ -51,7 +51,7 @@ Caveats, stated plainly:
     collection explicitly with --collection <id>.
 """
 
-__version__ = "2026.08.13.1"
+__version__ = "2026.9.18.1"
 
 import os
 import re

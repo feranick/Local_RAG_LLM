@@ -1,1 +1,19 @@
 .DS_Store
+
+# Python build/cache
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+
+# NEVER commit these: a .conf carries a collection id, absolute paths and the path
+# to an API key; hardware.conf is machine-specific; the state/key files are private.
+*.conf
+hardware.conf
+.rag_sync_*
+.capture_state.json
+
+# local scratch
+determinism_*/
+*.bak

@@ -13,7 +13,7 @@
 #
 # Build and install:
 #     python3 -m pip install --upgrade build
-#     python3 -m build --wheel            # -> dist/local_rag_llm-2026.9.15.1-py3-none-any.whl
+#     python3 -m build --wheel            # -> dist/local_rag_llm-2026.9.18.1-py3-none-any.whl
 #     python3 -m pip install dist/*.whl
 #
 # After installing, each script is on PATH under its own name (sync_folder,
@@ -29,7 +29,7 @@ name = "local-rag-llm"
 # Written in PEP 440 normalised form (no leading zeros), which is also exactly the
 # string every script carries in __version__ — one literal version across the repo,
 # nothing to translate between the wheel filename and the scripts.
-version = "2026.9.15.1"
+version = "2026.9.18.1"
 description = "Self-hosted RAG stack for Linux workstations: Ollama + Open WebUI, folder sync, hardware-aware model management and machine migration"
 readme = "README.md"
 requires-python = ">=3.9"

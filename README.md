@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.9.15.1**
+**Version 2026.9.18.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 
@@ -34,7 +34,7 @@ Both UIs share the same Ollama backend on different ports, so you can run either
 | `determinism_check.py` | Asks the same question N times through the API and reports how much the answer moves — text, cited sources and the numbers in it. `--compare` runs the set twice, as configured and with sampling pinned, so you can see whether a settings change actually bought repeatability. Writes a keepable artifact folder. |
 | `manage_models.py` | Browse, add, test, list, remove or set the default **LLM** on a running stack. `--browse`/`--tags` read the available models live from the Ollama library; every add is followed by a real load test, since a model can download and still fail to run on this Ollama build. |
 | `new_rag_instance.py` | Creates a **second, fully pre-configured Open WebUI instance** for an independent library with its own embedding model — container, admin account, API key, Knowledge collection and a ready sync config. Step-by-step: `NEW_INSTANCE_RUNBOOK.md`. |
-| `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in sync/README_sync.md.md).** |
+| `sync/sync_folder.py` | Keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — add/update, mirror deletions, re-sync, OCR text-less PDFs, and vision descriptions of figures & standalone images. **Documented separately in [`sync/README_sync.md`](sync/README_sync.md).** |
 
 ---
 
@@ -409,7 +409,7 @@ mode.** Sequence of findings here, in order:
    ability to refine a search across turns.
 
 So: write the notes for retrieval first (see *Writing notes that retrieval can
-actually find* in sync/README_sync.md), and treat `Legacy` as the guarantee you reach
+actually find* in `sync/README_sync.md`), and treat `Legacy` as the guarantee you reach
 for when a model still won't search, or when a wrong-but-confident answer would be
 costly. `Legacy` is deprecated upstream, so don't build on it if `Native` works.
 
@@ -530,7 +530,7 @@ one, silently:
 Re-running the harvest is safe: every captured line is recorded, so nothing is
 written twice. The harvest prompts for an `Also called:` alias line per note, which
 is the moment you actually know which words someone would search with — see *Writing
-notes that retrieval can actually find* in sync/README_sync.md.
+notes that retrieval can actually find* in `sync/README_sync.md`.
 
 Notes that must apply in **every** answer, regardless of retrieval, belong in the
 preset's system prompt instead — that's `pin_notes.py`.
@@ -546,7 +546,7 @@ python3 sync/sync_folder.py --config ~/lab_notes.conf --status   # expect 0 to g
 `--pull` downloads the collection's files into `WATCH_DIR` and records them against
 the remote ids they already have, so nothing is re-uploaded. A local file with the
 same name but different content is never overwritten — the server's copy lands beside
-it. Details in sync/README_sync.md.
+it. Details in `sync/README_sync.md`.
 
 With two instances, keep one notes folder and one config per instance — same
 `WATCH_DIR`, **different `STATE_FILE`** — so the same notes are retrievable in both
@@ -595,7 +595,7 @@ already doing.
 Worth turning on while exploring a library: **Keep Follow-Up Prompts in Chat**
 (Settings → Interface), which preserves the suggestions on older messages instead of
 only the latest one.
-- A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in sync/README_sync.md).
+- A heterogeneous collection makes agentic retrieval harder for *every* model: if a spreadsheet of tensile data is the top hit for a microscopy question, split the library (see *Running a second library* in `sync/README_sync.md`).
 - Before blaming retrieval, re-ask the same question with `#` + the collection. If that works, the index is fine and the difference was tool use.
 - The agentic tool set is worth knowing even so: `query_knowledge_files` is semantic, `grep_knowledge_files` does exact string/regex matching, and `view_file` reads a line range. Capable models chain them; a system prompt naming which to prefer per collection helps.
 
@@ -775,7 +775,7 @@ says nothing about your key or your model.
 
 `sync_folder.py` keeps a local folder in sync with your Open WebUI collection / AnythingLLM workspace — adding new/changed files, mirroring deletions, OCRing text-less PDFs, and describing figures and standalone images with a vision model. It lives in its own `sync/` folder with a dedicated guide:
 
-**→ See sync/README_sync.md for full setup, configuration, all flags, reset/wipe procedures, and sync-specific troubleshooting.
+**→ See [`sync/README_sync.md`](sync/README_sync.md)** for full setup, configuration, all flags, reset/wipe procedures, and sync-specific troubleshooting.
 
 Quick start (after creating the collection in the UI and setting `TARGET` + the API key file):
 
@@ -885,7 +885,7 @@ Either way, the in-UI Ollama base URL stays `http://host.docker.internal:11434` 
 
 ## Troubleshooting
 
-These are the exact issues encountered while bringing this stack up, and their fixes (all now handled by the scripts). **Sync-specific issues** (duplicate content, empty-extraction, API keys, `#` grounding) are covered in sync/README_sync.md.md).
+These are the exact issues encountered while bringing this stack up, and their fixes (all now handled by the scripts). **Sync-specific issues** (duplicate content, empty-extraction, API keys, `#` grounding) are covered in [`sync/README_sync.md`](sync/README_sync.md).
 
 **A model works from the Ollama CLI but doesn't appear in a web UI, or a container "cannot reach Ollama".**
 The container can't reach Ollama. By default Ollama binds to `127.0.0.1`; inside a container `host.docker.internal` resolves to the host gateway (e.g. `172.17.0.1`), which Ollama then refuses. Fix: bind Ollama to `0.0.0.0` and launch containers with `--add-host=host.docker.internal:host-gateway`. Check what address Ollama is bound to:

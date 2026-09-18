@@ -94,7 +94,7 @@ Usage:
                                                 # add --dry-run to see the plan first
 """
 
-__version__ = "2026.9.15.1"
+__version__ = "2026.9.18.1"
 
 import os
 import re

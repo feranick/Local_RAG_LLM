@@ -34,7 +34,7 @@ After capturing, index them:
     python3 sync_folder.py --config lab_notes.conf
 """
 
-__version__ = "2026.9.15.1"
+__version__ = "2026.9.18.1"
 
 import os
 import re
@@ -427,7 +427,17 @@ def main():
     a = ap.parse_args()
 
     conf = load_conf(a.config)
-    folder = a.notes or cfg(conf, "NOTES_DIR", str(pathlib.Path.home() / "lab_notes"))
+    # NOTES_DIR exists for the case where captures go somewhere other than the synced
+    # folder (a captured/ subfolder, say). When it isn't set, fall back to the sync
+    # tool's WATCH_DIR: for the usual setup the two are the same folder, and keeping
+    # one value in one place is the difference between a note that gets indexed and a
+    # note that sits in a directory nothing watches.
+    folder = (a.notes or cfg(conf, "NOTES_DIR")
+              or cfg(conf, "WATCH_DIR")
+              or str(pathlib.Path.home() / "lab_notes"))
+    where = ("--notes" if a.notes else
+             "NOTES_DIR" if cfg(conf, "NOTES_DIR") else
+             "WATCH_DIR" if cfg(conf, "WATCH_DIR") else "the default")
     base = (a.instance or cfg(conf, "BASE_URL", "http://localhost:3000")).rstrip("/")
     key_file = a.key_file or cfg(conf, "KEY_FILE", str(pathlib.Path.home() / ".rag_sync_key"))
 
@@ -440,7 +450,9 @@ def main():
         info("  capture_notes.py --harvest --since 7 --config ~/lab_notes.conf")
         return
 
-    print(f"[capture] notes folder: {folder}")
+    print(f"[capture] notes folder: {folder}   (from {where})")
+    if a.harvest:
+        print(f"[capture] harvesting chats from: {base}")
     if a.note:
         step("Capturing a note")
         print(f"  {a.note}")
