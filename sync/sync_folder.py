@@ -1209,8 +1209,14 @@ def collection_files(session):
     ]
     for label, path in candidates:
         url = f"{BASE_URL}{path}"
+        # A sub-route that lists files is usually PAGINATED. Asking for a big page
+        # explicitly is the difference between adopting a library and adopting its
+        # first 30 documents — which looks like success and silently leaves the rest
+        # untracked. Harmless on routes that ignore the parameters.
+        if "/files" in path or "/file/list" in path:
+            url += "?page=1&limit=100000"
         try:
-            r = session.get(url, timeout=120)
+            r = session.get(url, timeout=300)
         except Exception as e:
             attempts.append((label, path, f"{type(e).__name__}: {e}", 0))
             continue
@@ -1242,6 +1248,36 @@ def collection_files(session):
                                    or x.get("filename") or x.get("name"))}
                          for x in payload if isinstance(x, dict)) if e["id"]] \
             if isinstance(payload, list) else []
+        # If the route ignored `limit` and handed back one page, walk the rest. A
+        # collection of thousands answering with exactly 30 files is a page size, and
+        # taking it as the total is worse than failing: the pull "succeeds", records
+        # 30 documents, and leaves the library half-tracked.
+        if files and ("/files" in path or "/file/list" in path):
+            seen = {f["id"] for f in files}
+            page = 2
+            while len(files) % 10 == 0 and page <= 500:     # round count = suspicious
+                try:
+                    rp = session.get(f"{BASE_URL}{path}?page={page}&limit=100000",
+                                     timeout=300)
+                    if not rp.ok or "application/json" not in rp.headers.get("Content-Type", ""):
+                        break
+                    more_raw = rp.json()
+                except Exception:
+                    break
+                more = files_of(more_raw) if isinstance(more_raw, dict) else \
+                    [e for e in ({"id": x.get("id") or x.get("file_id"),
+                                  "name": ((x.get("meta") or {}).get("name")
+                                           or x.get("filename") or x.get("name"))}
+                                 for x in more_raw if isinstance(x, dict)) if e["id"]] \
+                    if isinstance(more_raw, list) else []
+                fresh = [m for m in more if m["id"] not in seen]
+                if not fresh:
+                    break
+                files.extend(fresh)
+                seen.update(m["id"] for m in fresh)
+                print(f"[sync]   …page {page}: {len(files)} file(s) so far")
+                page += 1
+
         attempts.append((label, path, "ok" if files else "no file list in the response",
                          len(files)))
         if files:
@@ -1284,6 +1320,7 @@ def cmd_pull(session, state, dry_run=False):
     print(f"[sync] {len(files)} file(s) attached to this collection")
     WATCH_DIR.mkdir(parents=True, exist_ok=True)
     got = skipped = failed = 0
+    generated = 0
     for i, f in enumerate(files, 1):
         fid = f["id"]
         name = f.get("name")
@@ -1300,6 +1337,34 @@ def cmd_pull(session, state, dry_run=False):
                 name = meta.get("name") or d.get("filename") or d.get("name")
             name = name or f"{fid}.md"
         name = pathlib.Path(str(name)).name          # never let the server pick a path
+
+        # Caption companions (`<paper>_figures.md`, `<image>_image.md`) are GENERATED
+        # by --describe-figures from a temp directory and only ever existed on the
+        # server. Writing them into WATCH_DIR would turn each one into a source
+        # document that the next sync uploads again — a second copy of every caption,
+        # and a folder full of files nobody wrote. Map them back onto the document
+        # they describe instead, which also restores the caption bookkeeping.
+        gen = next((s for s in ("_figures.md", "_image.md") if name.endswith(s)), None)
+        if gen:
+            stem = name[:-len(gen)]
+            src = next((p for p in sorted(WATCH_DIR.rglob(f"{stem}.*"))
+                        if p.is_file() and p.name != name), None)
+            if src:
+                e = state["files"].setdefault(str(src), {"hash": file_hash(src),
+                                                         "remote_id": None})
+                if gen == "_figures.md":
+                    e["figures_id"] = fid
+                    e.setdefault("figures_model", "unknown (recovered by --pull)")
+                else:
+                    e["remote_id"] = fid
+                    e.setdefault("desc_model", "unknown (recovered by --pull)")
+                generated += 1
+            else:
+                print(f"[sync] [{i}/{len(files)}] {name}: a caption doc whose source "
+                      f"is not in the folder — left on the server, not written")
+                generated += 1
+            continue
+
         dest = WATCH_DIR / name
 
         body = None
@@ -1345,8 +1410,13 @@ def cmd_pull(session, state, dry_run=False):
     if dry_run:
         print("[sync] --dry-run: nothing written")
         return
+    # Record who touched the state last. Without this, --status sees a state file
+    # written a minute ago with no heartbeat beside it and reports a sync "started
+    # from an older copy of this script" — alarming, and wrong.
+    state["last_op"] = {"kind": "pull", "when": time.time()}
     save_state(state)
     print(f"\n[sync] downloaded {got}, already identical {skipped}"
+          + (f", caption docs mapped (not written) {generated}" if generated else "")
           + (f", failed {failed}" if failed else ""))
     print(f"[sync] state recorded in {STATE_FILE}")
     print("[sync] confirm the folder and the collection now agree:")
@@ -1676,6 +1746,14 @@ def cmd_status():
               f"({b.get('stage','?')}).")
         print("[sync]   just re-run the same command; it resumes from the state file.")
     elif age < 600:
+        # …unless the recent write came from a maintenance command rather than a sync.
+        lo = st.get("last_op") or {}
+        if lo.get("when") and (time.time() - lo["when"]) < 1800:
+            mins = (time.time() - lo["when"]) / 60
+            print(f"[sync] no run in progress — the state file was last written by "
+                  f"--{lo.get('kind', '?')} {mins:.1f} min ago.")
+            print("[sync] the collection's own count is in the UI: Workspace → Knowledge.")
+            return
         # No heartbeat, yet the state file is moving: something IS syncing, but it
         # was started from a version without heartbeats (they arrived in
         # 2026.08.01.6). Don't claim it's idle.
