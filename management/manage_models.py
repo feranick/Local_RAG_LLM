@@ -49,6 +49,7 @@ import pathlib
 import argparse
 import subprocess
 from urllib.parse import quote
+from html import unescape
 
 try:
     import requests
@@ -87,6 +88,26 @@ UNUSABLE_TAG_MARKERS = ("-mlx", "mlx-", ":cloud", "-cloud")
 # describes what the weights were quantized to, not what can run them. `--tags` now
 # reads the MLX badge directly, so this list is only a pre-pull hint.
 PLATFORM_RISK_MARKERS = ("nvfp4", "mxfp8", "mxfp4", "-metal")
+
+# Quantization types that exist only in forks of llama.cpp, not in the engine stock
+# Ollama ships. Prism ML's Bonsai models are the current example: their 1-bit and
+# ternary packs (Q1_0, PQ2_0, PTQ1_0) are the whole point of the model and need
+# Prism's own llama.cpp build. A tag named after one of these downloads fine and
+# then cannot be loaded, so it is flagged — and so is every tag sharing its digest,
+# since `:latest` or `:vision` is often the same file under a friendlier name.
+NONSTOCK_QUANTS = re.compile(r"(^|[-_:])(p?tq[12]_0|pq2_0|q1_0)($|[-_])", re.I)
+
+# Weight formats stock Ollama loads. Used when an uploader states outright that most
+# of a model's tags need a fork: the tags in a standard format are the ones worth
+# trying. "mmproj-…" names describe the vision projector, not the weights.
+STANDARD_WEIGHTS = re.compile(
+    r"(^|-)(f16|fp16|bf16|f32|q8_0|q6_k|q5_k_[ms]|q5_[01]|q4_k_[ms]|q4_[01]|"
+    r"q3_k_[sml]|q2_k|iq[1-4]_\w+)$", re.I)
+
+# Uploader descriptions that say the model won't run on stock Ollama.
+FORK_NOTICE = re.compile(
+    r"stock ollama cannot|cannot load (?:q1|it)|requires [\w' ]*(?:fork|llama[.-]?cpp)|"
+    r"llama\.cpp fork|not (?:yet )?supported by ollama", re.I)
 
 
 # How much model this machine can hold. Measured, not assumed: a DGX Spark has
@@ -132,6 +153,24 @@ def _size_gb(txt):
     return v / 1024 if u == "MB" else (v * 1024 if u == "TB" else v)
 
 
+_PAGE_NOTE = {}          # model name -> uploader's description, filled by catalog_tags
+
+# Top-level paths on ollama.com that are site pages, not user namespaces.
+_RESERVED = {"library", "search", "blog", "docs", "download", "signin", "signup",
+             "pricing", "public", "api", "settings", "models", "turbo", "cloud"}
+
+
+def model_path(name):
+    """ollama.com path for a model: official ones live under /library/, community
+    uploads under /<user>/<model>. Everything that read only /library/ was blind to
+    the second kind — which is where e.g. every Bonsai build lives."""
+    return name if "/" in name else f"library/{name}"
+
+
+def is_community(name):
+    return "/" in name
+
+
 def catalog_tags(name):
     """[dict(tag, gb, ctx, vision, mlx, digest)] for a model, from its library page.
 
@@ -149,8 +188,14 @@ def catalog_tags(name):
     badge. Nothing about the tag name gives that away, so the badge is parsed and the
     digest is kept to expose aliases.
     """
-    html = http_get(f"{CATALOG}/library/{name}/tags")
-    hits = list(re.finditer(r"/library/" + re.escape(name) + r":([A-Za-z0-9._\-]+)", html))
+    path = model_path(name)
+    html = http_get(f"{CATALOG}/{path}/tags")
+    # the uploader's own description — it is where "stock Ollama cannot load this"
+    # gets said, and nothing else on the page says it
+    m_desc = re.search(r'<meta name="description" content="([^"]*)"', html) or \
+        re.search(r'meta-description:\s*(.+)', html)
+    _PAGE_NOTE[name] = unescape(m_desc.group(1)) if m_desc else ""
+    hits = list(re.finditer(r"/" + re.escape(path) + r":([A-Za-z0-9._\-]+)", html, re.I))
     out, seen = [], set()
     for i, m in enumerate(hits):
         tag = m.group(1)
@@ -201,20 +246,28 @@ def catalog_search(term=None):
     """
     url = f"{CATALOG}/search?q={quote(term)}" if term else f"{CATALOG}/search"
     html = http_get(url)
-    hits = [m for m in re.finditer(r'href="/library/([A-Za-z0-9._\-]+)"', html)
-            if ":" not in m.group(1)]
+    # Both kinds of card: /library/NAME (official) and /USER/MODEL (community).
+    # Reading only the first made a model that exists solely as community uploads
+    # look like it doesn't exist at all.
+    hits = []
+    for m in re.finditer(r'href="/([A-Za-z0-9._\-]+)/([A-Za-z0-9._\-]+)"', html):
+        ns, model = m.group(1), m.group(2)
+        if ns == "library":
+            hits.append((m, model))
+        elif ns.lower() not in _RESERVED:
+            hits.append((m, f"{ns}/{model}"))
     out, seen = [], set()
-    for i, m in enumerate(hits):
-        name = m.group(1)
+    for i, (m, name) in enumerate(hits):
         if name in seen:
             continue
         seen.add(name)
-        stop = hits[i + 1].start() if i + 1 < len(hits) else len(html)
+        stop = hits[i + 1][0].start() if i + 1 < len(hits) else len(html)
         raw = html[m.end():min(stop, m.end() + 3000)]
         card = _text(raw)
-        head = re.split(r"\d[\d.]*[KMB]?\s*Pulls", card)[0]
+        head = re.split(r"\d[\d.,]*[KMB]?\s*Pulls", card)[0]
         caps = [c for c in CAP_WORDS if re.search(rf"\b{c}\b", head, re.I)]
-        sizes = re.findall(r"\b(e?\d+(?:\.\d+)?b)\b", head, re.I)
+        sizes = list(dict.fromkeys(z.lower() for z in
+                                   re.findall(r"\b(e?\d+(?:\.\d+)?b)\b", head, re.I)))
         desc = _blurb(raw, name)
         if not desc:                      # fall back: cut where the chips start
             h = re.sub(r"^[^A-Za-z]+", "", head)
@@ -227,8 +280,11 @@ def catalog_search(term=None):
             "desc": desc,
             "caps": caps,
             "sizes": sizes,
-            "pulls": (re.search(r"([\d.]+[KMB]?)\s*Pulls", card) or [None, ""])[1],
+            "pulls": (re.search(r"([\d.,]+[KMB]?)\s*Pulls", card) or [None, ""])[1],
             "ntags": (re.search(r"(\d+)\s*Tags?\b", card) or [None, ""])[1],
+            "community": is_community(name),
+            # the uploader saying outright that stock Ollama can't run it
+            "needs_fork": bool(FORK_NOTICE.search(card)),
         })
     return out
 
@@ -245,8 +301,8 @@ def cmd_browse(term, show_all):
         warn(f"nothing matched — try a broader term, or open {CATALOG}/search")
         return
     have = {m.get("name", "").split(":")[0] for m in installed(soft=True)}
-    shown = cloud_only = 0
-    print(f"  {'model':22} {'sizes':22} {'pulls':>7}  notes")
+    shown = cloud_only = community = 0
+    print(f"  {'model':40} {'sizes':18} {'pulls':>7}  notes")
     for m in found:
         # a model whose only tag is a cloud tag runs on Ollama's servers, not here
         if "cloud" in m["caps"] and not m["sizes"]:
@@ -256,17 +312,25 @@ def cmd_browse(term, show_all):
         if not show_all and shown >= 30:
             continue
         shown += 1
+        community += m["community"]
         mark = f"{G}✔{X}" if m["name"] in have else " "
         notes = [c for c in m["caps"] if c != "tools"]
         if m["ntags"]:
             notes.append(f"{m['ntags']} tags")
-        print(f"  {mark} {m['name']:20} {' '.join(m['sizes'])[:21]:22} "
+        if m["community"]:
+            notes.append("community")
+        if m["needs_fork"]:
+            notes.append(f"{R}uploader: stock Ollama can't load it{X}")
+        print(f"  {mark} {m['name']:38} {' '.join(m['sizes'])[:17]:18} "
               f"{m['pulls']:>7}  {', '.join(notes)}")
         if m["desc"]:
             print(f"      {m['desc'][:88]}")
     print(f"\n  {len(found)} model(s) listed"
           + (f", {cloud_only} cloud-only hidden (can't run locally)" if cloud_only and not show_all else "")
           + ("" if show_all else "; --all shows everything"))
+    if community:
+        print(f"  {community} are {B}community{X} uploads (user/model): not from Ollama and "
+              f"not verified — someone else's conversion of someone else's weights.")
     print(f"  'sizes' are parameter counts, not memory — this machine holds "
           f"~{USABLE_MEM_GB:.0f} GB of loaded weights.")
     print("  next:  python3 manage_models.py --tags <model>    # exact tags + download sizes")
@@ -278,28 +342,43 @@ def cmd_tags(name, show_all):
         tags = catalog_tags(name)
     except Exception as e:
         bad(f"could not read the tag list: {e}")
-        info(f"check the name — see: {CATALOG}/library/{name}/tags")
+        info(f"check the name — see: {CATALOG}/{model_path(name)}/tags")
         return
     if not tags:
         # Almost always a name that isn't a library name: "deepseek" is a family,
-        # the models are deepseek-r1, deepseek-v4-flash, … Searching for it turns a
-        # dead end into the list the user was actually after.
-        warn(f"no model called '{name}' in the library")
+        # the models are deepseek-r1, deepseek-v4-flash, … and "bonsai" exists ONLY
+        # as community uploads. Searching turns a dead end into the list the user was
+        # actually after — community uploads included.
+        warn(f"no model called '{name}' in the official library")
         try:
             found = [m for m in catalog_search(name) if name.lower() in m["name"].lower()]
         except Exception:
             found = []
         if found:
             info("did you mean one of these?")
-            for m in found[:12]:
+            for m in found[:15]:
                 sizes = " ".join(m["sizes"][:6])
                 caps = ", ".join(c for c in m["caps"] if c != "tools")
-                print(f"      {m['name']:26} {sizes:24} {caps}")
+                tag = "  [community]" if m["community"] else ""
+                fork = f"  {R}[needs a llama.cpp fork]{X}" if m["needs_fork"] else ""
+                print(f"      {m['name']:42} {sizes:14} {caps}{tag}{fork}")
+            if any(m["community"] for m in found):
+                info("community names include the uploader:  --tags user/model")
             info(f"then:  python3 manage_models.py --tags <name>")
         else:
             info(f"try a search:  python3 manage_models.py --browse {name}")
-            info(f"or open {CATALOG}/library/{name}/tags")
+            info(f"or open {CATALOG}/{model_path(name)}/tags")
         return
+
+    notice = _PAGE_NOTE.get(name, "")
+    uploader_says_fork = bool(FORK_NOTICE.search(notice))
+    if is_community(name):
+        warn(f"'{name}' is a COMMUNITY upload, not an official Ollama model — "
+             f"unverified, and only as good as the uploader's conversion")
+    if uploader_says_fork:
+        warn("the uploader says stock Ollama cannot load (most of) this model:")
+        print(f"      “{notice[:220].strip()}”")
+
     have = {m.get("name", "") for m in installed(soft=True)}
     # Tags sharing a digest are the same build under different names. Showing that
     # saves pulling "two" models to compare and finding they are byte-identical.
@@ -307,22 +386,41 @@ def cmd_tags(name, show_all):
     for t in tags:
         if t["digest"]:
             first_by_digest.setdefault(t["digest"], t["tag"])
-    hidden = 0
-    print(f"  {'tag':30} {'size':>8}  {'ctx':>6}  notes")
+    # A fork-only quant is recognisable by NAME (":pq2_0") — and then by digest, so
+    # ":latest" / ":vision" / ":27b", which are often the same file, get flagged too.
+    fork_digests = {t["digest"] for t in tags
+                    if t["digest"] and NONSTOCK_QUANTS.search(t["tag"])}
+
+    def needs_fork(t):
+        if NONSTOCK_QUANTS.search(t["tag"]) or t["digest"] in fork_digests:
+            return True
+        # uploader says it needs a fork: trust that for everything NOT in a standard
+        # weight format ("…-mmproj-bf16" names the projector, not the weights)
+        if uploader_says_fork:
+            return "mmproj" in t["tag"].lower() or not STANDARD_WEIGHTS.search(t["tag"])
+        return False
+
+    hidden = hidden_fork = 0
+    width = max(28, max(len(f"{name}:{t['tag']}") for t in tags) + 1)
+    print(f"  {'tag':{width + 2}} {'size':>8}  {'ctx':>6}  notes")
     for t in tags:
         tag, gb = t["tag"], t["gb"]
         full = f"{name}:{tag}"
-        # unusable = a cloud tag, an -mlx name, OR anything the page badges MLX
-        # (which is how -nvfp4 / -mxfp8 are published)
-        unusable = t["mlx"] or any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS)
+        fork = needs_fork(t)
+        # unusable = a cloud tag, an -mlx name, anything the page badges MLX (which is
+        # how -nvfp4 / -mxfp8 are published), or a quant only a llama.cpp fork loads
+        unusable = t["mlx"] or fork or any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS)
         if unusable and not show_all:
             hidden += 1
+            hidden_fork += fork
             continue
         bits = []
         if t["vision"]:
             bits.append("vision")
         if t["mlx"]:
             bits.append("MLX — Apple only, will fail with 'requires macOS'")
+        elif fork:
+            bits.append(f"{R}needs a llama.cpp fork — stock Ollama can't load it{X}")
         elif any(k in f":{tag}" for k in UNUSABLE_TAG_MARKERS):
             bits.append("NOT usable locally (cloud tag)")
         elif gb and gb > USABLE_MEM_GB:
@@ -334,22 +432,31 @@ def cmd_tags(name, show_all):
             bits.append(f"same build as :{alias}")
         mark = f"{G}✔{X}" if full in have else " "
         size = "?" if not gb else (f"{gb:.1f} GB" if gb < 10 else f"{gb:.0f} GB")
-        print(f"  {mark} {full:28} {size:>8}  {t['ctx']:>6}  {', '.join(bits)}")
+        print(f"  {mark} {full:{width}} {size:>8}  {t['ctx']:>6}  {', '.join(bits)}")
     if hidden and hidden == len(tags):
-        # Some models are published ONLY as cloud tags: they run on Ollama's servers
-        # and are billed, and there is nothing to download. Saying "3 tags hidden"
-        # under an empty table reads like a filter bug rather than the real answer.
-        bad(f"every tag of '{name}' is cloud- or Apple-only — it CANNOT run on this "
-            f"machine")
-        info("cloud tags execute on Ollama's servers (account + usage charges), which")
-        info("also means your documents would leave this machine — the opposite of the")
-        info("point of this stack")
+        # Saying "3 tags hidden" under an empty table reads like a filter bug rather
+        # than the real answer, so say WHY nothing here can run.
+        if hidden_fork == hidden:
+            bad(f"every tag of '{name}' needs a llama.cpp fork — stock Ollama cannot "
+                f"load any of them")
+            info("these quant types (1-bit / ternary) exist only in the model maker's")
+            info("own llama.cpp build; they download, then fail to load")
+        else:
+            bad(f"every tag of '{name}' is cloud-, Apple- or fork-only — it CANNOT run "
+                f"on this machine")
+            info("cloud tags execute on Ollama's servers (account + usage charges), "
+                 "which also means")
+            info("your documents would leave this machine — the opposite of the point "
+                 "of this stack")
         info(f"see them anyway with:  python3 manage_models.py --tags {name} --all")
         return
     if hidden:
-        info(f"{hidden} MLX/cloud tag(s) hidden — use --all to see them")
-        info("MLX tags are Apple builds. Note the format-named ones (-nvfp4, -mxfp8)")
-        info("are MLX too: the name is the numeric format, not the vendor's runtime.")
+        info(f"{hidden} tag(s) hidden that cannot run here — use --all to see them")
+        if hidden_fork:
+            info(f"  {hidden_fork} need a llama.cpp fork (1-bit/ternary quants), "
+                 f"including aliases of those files")
+        if hidden - hidden_fork:
+            info("  the rest are MLX (Apple) or cloud tags — note -nvfp4/-mxfp8 are MLX too")
     print(f"\n  install one with:  python3 manage_models.py --add {name}:<tag>")
 
 
@@ -572,6 +679,18 @@ def cmd_add(name):
         warn("library these tags (-nvfp4, -mxfp8) are badged MLX, i.e. Apple builds")
         info(f"check the badge:  python3 manage_models.py --tags {name.split(':')[0]} --all")
         info("if it is MLX, the pull will stop at the manifest with 'requires macOS'")
+    tag = name.split(":", 1)[1] if ":" in name else "latest"
+    if NONSTOCK_QUANTS.search(tag):
+        bad(f"':{tag}' is a 1-bit/ternary quant that only a llama.cpp FORK can load —")
+        bad("stock Ollama will download it and then fail to run it")
+        info(f"look for a standard-format tag:  python3 manage_models.py --tags "
+             f"{name.split(':')[0]}")
+        if input("  pull it anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+            return
+    if is_community(name.split(":")[0]):
+        warn(f"'{name}' is a community upload: not from Ollama, not verified. It is only")
+        warn("as good as the uploader's conversion — check it on questions you can")
+        warn("answer before anyone relies on it.")
     if shutil.which("ollama") is None:
         sys.exit("the 'ollama' CLI is required to pull models")
     names = [m.get("name") for m in installed(soft=True)]
