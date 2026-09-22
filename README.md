@@ -553,6 +553,48 @@ With two instances, keep one notes folder and one config per instance — same
 UIs. Capture where you actually chat: a note synced only to the papers instance is
 invisible in conversations held on the other one.
 
+### Live calendar lookups (`openwebui_tools/breakerspace_calendar_tool.py`)
+
+Questions like *"what trainings are on Thursday?"* or *"is a lab assistant in
+tomorrow?"* are **date** questions, and vector retrieval is poor at dates — a note
+about 25 September isn't reliably closer to "Thursday" than one about the 24th. So the
+calendar isn't indexed at all: an Open WebUI **Tool** fetches the Breakerspace LibCal
+feed when asked and filters by date exactly.
+
+Install once:
+
+1. **Workspace → Tools → +**, paste the whole of `breakerspace_calendar_tool.py`, Save.
+2. **Workspace → Models → *your preset* → Tools** → tick *Breakerspace Calendar*.
+3. Keep **Function Calling = Native** (the default) — the model decides to call it.
+4. Optionally add one line to the preset's system prompt:
+   *"For any question about Breakerspace events, schedules, trainings or who is on
+   duty, call breakerspace_calendar — never answer those from memory."*
+
+The model passes the user's own words (`thursday`, `next week`, `october`,
+`2026-09-25`) and the tool works out the dates — models are unreliable about what
+today is, so the tool states it in every answer. It also accepts a category
+(`training`, `lab assistant`, `reserved`) and a keyword (`SEM`, `XRD`, `lounge`).
+
+What it deliberately does:
+
+| Situation | Behaviour |
+|---|---|
+| Nothing scheduled in the window | says so explicitly, and tells the model not to invent events |
+| A phrase it can't parse | shows the next 7 days **and says so**, so the model can retry with a date |
+| LibCal unreachable | reports it and points to the calendar page — no guessing |
+| Repeated questions | one fetch per 15 minutes (the feed's own refresh interval) |
+
+It's standard library only, so there is nothing to install in the container. Times
+are in local time, and it still gets daylight saving right if the container lacks a
+timezone database. The only outbound request is to LibCal; chats and documents stay
+local. Feed URL, time zone, cache and output length are **Valves** — the gear icon on
+the tool — so pointing it at another LibCal calendar needs no code change: use the
+calendar's **iCal → subscribe** link.
+
+**Scope:** events — trainings, lab-assistant hours, tours, room reservations and
+notices. **Instrument bookings are not in this feed**; they live in LibCal *spaces*
+and would need LibCal's authenticated API.
+
 ### Follow-up suggestions, titles and tags: the task model
 
 The clickable follow-up questions under each answer are **not** produced by the chat
