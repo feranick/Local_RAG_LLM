@@ -223,8 +223,33 @@ here. Open the preset's **editor** (pencil icon, or `…/workspace/models/edit?i
 
 **2. Admin settings that name a model.** In Admin Panel → Settings:
 - **Documents** → embedding model shows `bge-m3`.
-- **Interface → Task Model** → leave it on the current chat model. A second model
-  would compete for the same 16 GB.
+- **Interface → Task Model** → a small model **without a thinking mode**, not the
+  chat model: `ollama pull llama3.2:3b` (~2 GB), select it (local and external, if
+  both are listed), and hide it from the selector. Background tasks (titles, tags,
+  search queries) sent to a thinking chat model reason at length over each one;
+  Ollama serves one request at a time, so a question queued behind them waited
+  **over a minute** before retrieval even started. Measured on carbonio:
+  chat model + `bge-m3` + `llama3.2:3b` fit comfortably in the 16 GB.
+- **Interface → Retrieval query generation** → **off**. It's an extra model call
+  before every retrieval; with it off, the question is searched as typed — as good
+  for direct questions, and the answer starts within seconds. Also off unless
+  wanted: web search query generation, tags, follow-ups, autocomplete. Keep title
+  generation (a second or two on the small model).
+
+> Diagnosing a slow start: `journalctl -u ollama -f | grep GIN` while asking. A
+> healthy question shows `/api/embed` within about a second, then the answer's
+> `/api/chat`. Minute-long `/api/chat` lines **before** the embed are queued
+> background tasks.
+
+**Keep models resident.** Ollama unloads idle models after 5 minutes, so the first
+chat after a pause pays the load again. Both fit, so keep them loaded:
+
+```bash
+sudo systemctl edit ollama
+#   [Service]
+#   Environment="OLLAMA_KEEP_ALIVE=-1"
+sudo systemctl restart ollama          # `ollama ps` → UNTIL: Forever
+```
 
 **3. The figure captioner** in `~/breakerspace.conf`, for documents added from now on:
 
