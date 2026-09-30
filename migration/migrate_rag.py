@@ -187,8 +187,15 @@ def volume_exists(DOCKER, name):
 
 
 def containers_using(DOCKER, volume):
-    r = run(DOCKER + ["ps", "-q", "--filter", f"volume={volume}"])
-    return [c for c in r.stdout.split() if c]
+    """[(id, name, image, command)] of RUNNING containers that mount the volume."""
+    r = run(DOCKER + ["ps", "--filter", f"volume={volume}",
+                      "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Command}}"])
+    out = []
+    for line in r.stdout.splitlines():
+        parts = (line.split("\t") + ["", "", "", ""])[:4]
+        if parts[0]:
+            out.append(tuple(p.strip().strip('"') for p in parts))
+    return out
 
 
 def human(n):
@@ -199,20 +206,38 @@ def human(n):
 
 
 # ----------------------------- export ------------------------------------
+EXPORT_CONTAINER_PREFIX = "rag-migrate-export-"
+
+
 def export_volume(DOCKER, name, out_dir, dry):
-    """tar a docker volume into out_dir/<name>.tgz using a throwaway container."""
+    """tar a docker volume into out_dir/volume__<name>.tgz using a throwaway container.
+
+    Written to a .partial file and renamed only when tar succeeds, so an interrupted
+    export can never leave behind something that looks like a finished archive. The
+    worker container is NAMED, so a leftover one from an interrupted run is
+    recognisable — `docker run` keeps going in the background when the terminal that
+    started it goes away, and it holds the volume the whole time."""
     tgz = out_dir / f"volume__{name}.tgz"
-    cmd = DOCKER + ["run", "--rm",
+    part = out_dir / f"volume__{name}.tgz.partial"
+    worker = EXPORT_CONTAINER_PREFIX + re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    cmd = DOCKER + ["run", "--rm", "--name", worker,
                     "-v", f"{name}:/data:ro",
                     "-v", f"{out_dir}:/backup",
-                    "alpine", "tar", "czf", f"/backup/{tgz.name}", "-C", "/data", "."]
+                    "alpine", "tar", "czf", f"/backup/{part.name}", "-C", "/data", "."]
     if dry:
         info("would run: " + " ".join(cmd))
         return None
+    # never let an old or half-written archive stand in for this one
+    for stale in (tgz, part):
+        if stale.exists():
+            warn(f"removing an earlier archive: {stale.name} ({human(stale.stat().st_size)})")
+            stale.unlink()
     r = run(cmd)
     if r.returncode != 0:
         bad(f"failed to archive volume {name}: {r.stderr.strip()[:200]}")
+        part.unlink(missing_ok=True)
         return None
+    part.rename(tgz)
     ok(f"volume {name} → {tgz.name} ({human(tgz.stat().st_size)})")
     return tgz.name
 
@@ -292,21 +317,38 @@ def cmd_export(cfg, dry):
                 "volumes": {}, "trees": [], "files": [], "models": [],
                 "containers": {}}
 
+    skipped = []                          # requested volumes that did NOT get archived
     step("1/5  Docker volumes")
     if not vols:
         warn("no VOLUMES configured — the collections and their vectors will NOT move")
     for v in vols:
         if not dry and not volume_exists(DOCKER, v):
             bad(f"volume '{v}' does not exist — skipping")
+            skipped.append(v)
             continue
         running = containers_using(DOCKER, v) if not dry else []
         if running:
-            warn(f"volume {v} is in use by a running container.")
+            leftovers = [c for c in running if c[1].startswith(EXPORT_CONTAINER_PREFIX)
+                         or (c[2].startswith("alpine") and "tar" in c[3])]
+            warn(f"volume {v} is in use by {len(running)} running container(s):")
+            for cid, cname, image, command in running:
+                print(f"        {cid}  {cname:34} {image:24} {command[:40]}")
+            if leftovers and len(leftovers) == len(running):
+                warn("  that is an archive worker left over from an INTERRUPTED export —")
+                warn("  it is still copying the volume in the background. Remove it:")
+                warn(f"      {' '.join(DOCKER)} rm -f {' '.join(c[0] for c in leftovers)}")
+                warn("  then run the export again.")
+                skipped.append(v)
+                continue
             warn("  Archiving a live SQLite database can capture a torn state.")
-            warn(f"  Stop it first:  {' '.join(DOCKER)} stop <container>")
+            warn(f"  Stop it first:  {' '.join(DOCKER)} stop "
+                 f"{' '.join(c[1] for c in running)}")
             if input("  archive anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                skipped.append(v)
                 continue
         name = export_volume(DOCKER, v, out_dir, dry)
+        if not name and not dry:
+            skipped.append(v)
         if name:
             manifest["volumes"][v] = name
             insp = run(DOCKER + ["inspect", v, "--format", "{{json .Config}}"])
@@ -340,12 +382,34 @@ def cmd_export(cfg, dry):
         print("\n[dry-run] nothing was written.\n")
         return
 
-    (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2))
-    cfgsrc = find_config(None)
-    if cfgsrc:
+    # Package the config that was ACTUALLY used (--config). Looking it up again by
+    # the default name picked up whatever migrate_rag.conf sat in the working
+    # directory — an old template, say — so the new machine could import with
+    # different volumes, no NEW_HOME and MODELS=AUTO, or with no config at all.
+    cfgsrc = pathlib.Path(cfg["__PATH__"]) if cfg.get("__PATH__") else None
+    if cfgsrc and cfgsrc.is_file():
         shutil.copy2(cfgsrc, out_dir / "migrate_rag.conf")
+        manifest["config_source"] = str(cfgsrc)
+    else:
+        warn("could not package the config file — copy it over by hand")
+    (out_dir / MANIFEST).write_text(json.dumps(manifest, indent=2))
+
+    # An archive for a volume this run did NOT export is left over from an earlier
+    # attempt — possibly cut off mid-write. Remove it so it can't be imported.
+    for v in skipped:
+        for stale in (out_dir / f"volume__{v}.tgz", out_dir / f"volume__{v}.tgz.partial"):
+            if stale.exists():
+                warn(f"removing {stale.name}: left over from an earlier run, not this one")
+                stale.unlink()
 
     total = sum(f.stat().st_size for f in out_dir.rglob("*") if f.is_file())
+    if skipped:
+        print(f"\n{R}{B}============ EXPORT INCOMPLETE ============{X}")
+        bad(f"not archived: {', '.join(skipped)}")
+        bad("the package does NOT contain those volumes — collections, vectors and")
+        bad("accounts would not move. Fix the cause above and run the export again.")
+        print(f"  folder : {out_dir}   ({human(total)})\n")
+        sys.exit(1)
     print(f"\n{B}================ EXPORT DONE ================{X}")
     print(f"  folder : {out_dir}   ({human(total)})")
     print(f"  volumes: {len(manifest['volumes'])}   trees: {len(manifest['trees'])}   "
@@ -701,6 +765,7 @@ def main():
         die("no migrate_rag.conf found — create one with --init-config")
     print(f"[migrate] v{__version__} | config: {path}")
     cfg = load_config(path)
+    cfg["__PATH__"] = str(path)           # the file actually in use, for the package
 
     if a.export:
         cmd_export(cfg, a.dry_run)
