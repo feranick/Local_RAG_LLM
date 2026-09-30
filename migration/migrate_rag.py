@@ -90,6 +90,11 @@ NEW_HOME    =
 # Format: OLD_PATH=>NEW_PATH , one per comma-separated entry.
 # PATH_MAP  = /home/feranick/breakerspace=>/data/breakerspace
 
+# Optional: an instance changes port or host on the new machine. Rewrites BASE_URL
+# (and OLLAMA_URL) in the migrated .conf files. The volume doesn't care which port
+# the container is published on — only the configs that talk to it do.
+# URL_MAP   = http://localhost:3002=>http://localhost:3000
+
 # Re-pull these models on the new machine. Leave AUTO to use the list captured
 # at export time (recommended — it records exactly what was installed).
 MODELS      = AUTO
@@ -111,16 +116,40 @@ def find_config(explicit=None):
 
 
 def load_config(path):
+    """KEY = value lines. A value ending in a comma continues on the next line(s),
+    so long lists can be written one entry per line:
+
+        SYNC_FILES  = ~/a.conf,
+                      ~/b.conf
+
+    Before this, the continuation lines had no '=' and were dropped WITHOUT a word —
+    a five-file SYNC_FILES exported one file, leaving the state files behind and
+    guaranteeing a duplicate library on the new machine."""
     cfg = {}
     if not path:
         return cfg
+    key = None
     for raw in path.read_text(errors="ignore").splitlines():
         line = raw.strip()
-        if not line or line[0] in "#;[" or "=" not in line:
+        if not line or line[0] in "#;[":
+            continue
+        val_part = line.split("#")[0].strip()
+        if key and cfg.get(key, "").endswith(","):
+            # continuation of a comma-terminated list, whether or not it is indented
+            if "=" not in val_part or raw[:1].isspace():
+                cfg[key] += " " + os.path.expandvars(val_part.strip('"').strip("'"))
+                continue
+        if "=" not in line:
+            if raw[:1].isspace() and key:
+                sys.exit(f"config: line '{line}' looks like the continuation of {key}, "
+                         f"but the previous line doesn't end with a comma")
             continue
         k, v = line.split("=", 1)
         v = v.split("#")[0].strip().strip('"').strip("'")
-        cfg[k.strip().upper()] = os.path.expandvars(v)
+        key = k.strip().upper()
+        cfg[key] = os.path.expandvars(v)
+    for k in cfg:                                  # a trailing comma on the last line
+        cfg[k] = cfg[k].rstrip(", ").strip()
     return cfg
 
 
@@ -342,6 +371,17 @@ def build_path_map(cfg, manifest):
     return m
 
 
+def build_url_map(cfg):
+    """{old_url: new_url} from URL_MAP entries, e.g.
+    URL_MAP = http://localhost:3002=>http://localhost:3000"""
+    m = {}
+    for entry in cfg_list(cfg, "URL_MAP"):
+        if "=>" in entry:
+            o, n = entry.split("=>", 1)
+            m[o.strip().rstrip("/")] = n.strip().rstrip("/")
+    return m
+
+
 def remap(path_str, path_map):
     for old, new in path_map.items():
         if path_str == old or path_str.startswith(old + "/"):
@@ -380,10 +420,17 @@ def rewrite_state_file(p, path_map, dry, assume_yes, label=None):
     ok(f"{label}: {n} path(s) rewritten (backup: {p.name}.bak)")
 
 
-CONF_PATH_KEYS = ("WATCH_DIR", "KEY_FILE", "STATE_FILE")
+# Every path-valued key the tools read. NOTES_DIR belongs here: capture_notes.py
+# writes into it, and leaving the old home in it sends captures to a directory that
+# doesn't exist on the new machine.
+CONF_PATH_KEYS = ("WATCH_DIR", "KEY_FILE", "STATE_FILE", "NOTES_DIR")
+
+# URL-valued keys, rewritten through URL_MAP — for when an instance changes port or
+# host on the new machine (e.g. breakerspace moving from :3002 to :3000).
+CONF_URL_KEYS = ("BASE_URL", "OLLAMA_URL")
 
 
-def rewrite_conf_file(p, path_map, dry, assume_yes, label=None):
+def rewrite_conf_file(p, path_map, dry, assume_yes, label=None, url_map=None):
     """Rewrite path-valued entries inside a sync_folder .conf file."""
     label = label or p.name
     try:
@@ -394,6 +441,18 @@ def rewrite_conf_file(p, path_map, dry, assume_yes, label=None):
     out, changes = [], []
     for line in lines:
         m = re.match(r"^(\s*([A-Za-z_]+)\s*=\s*)(.*)$", line)
+        if m and url_map and m.group(2).upper() in CONF_URL_KEYS:
+            head, val = m.group(1), m.group(3)
+            comment = ""
+            if "#" in val:
+                val, comment = val.split("#", 1)
+                comment = "#" + comment
+            v = val.strip().rstrip("/")
+            new = url_map.get(v, v)
+            if new != v:
+                changes.append((line.strip(), f"{head}{new} {comment}".rstrip()))
+                out.append(f"{head}{new} {comment}".rstrip())
+                continue
         if m and m.group(2).upper() in CONF_PATH_KEYS:
             head, val = m.group(1), m.group(3)
             comment = ""
@@ -517,15 +576,19 @@ def cmd_import(cfg, dry, assume_yes):
         ok(f"{dest}")
         restored.append((dest, dest))
 
-    step("4/5  Rewriting absolute paths")
-    if not path_map:
+    step("4/5  Rewriting absolute paths and URLs")
+    url_map = build_url_map(cfg)
+    for o, n in url_map.items():
+        info(f"url rewrite: {o}  ->  {n}")
+    if not path_map and not url_map:
         info("nothing to rewrite")
     else:
         for dest, readable in restored:
-            if dest.name.endswith(".json") and "rag_sync_state" in dest.name:
+            if path_map and dest.name.endswith(".json") and "rag_sync_state" in dest.name:
                 rewrite_state_file(readable, path_map, dry, assume_yes, label=dest.name)
             elif dest.suffix == ".conf":
-                rewrite_conf_file(readable, path_map, dry, assume_yes, label=dest.name)
+                rewrite_conf_file(readable, path_map, dry, assume_yes, label=dest.name,
+                                  url_map=url_map)
 
     step("5/5  Ollama models to re-pull")
     models = cfg_list(cfg, "MODELS")

@@ -115,6 +115,8 @@ Edit the copied config **before** running this:
 cd ~/rag_migration
 $EDITOR migrate_rag.conf      # set NEW_HOME if the username/home differs
                               # or PATH_MAP for a different documents location
+                              # and URL_MAP if an instance changes port, e.g.
+                              #   URL_MAP = http://localhost:3002=>http://localhost:3000
 python3 migrate_rag.py --import --config ~/rag_migration/migrate_rag.conf --dry-run
 ```
 
@@ -133,6 +135,18 @@ skips the prompts). Backups are left as `.bak` next to every file it edits.
 the `.conf` and the state file.
 
 ---
+
+**Moving to a smaller machine?** `MODELS = AUTO` re-pulls everything the old machine
+had installed, including models the new one can't hold. List what you actually want
+instead, keeping the embedder's **exact** name:
+
+```ini
+MODELS = bge-m3, gemma4:12b-it-qat
+```
+
+Then check the presets: a preset whose base model isn't installed on the new machine
+stops working until you point it at one that is (Workspace → Models → editor → Base
+Model). The volume carries the preset, but not the model it names.
 
 ## Stage 6 — Start the containers
 
