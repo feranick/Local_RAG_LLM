@@ -383,9 +383,16 @@ def build_url_map(cfg):
 
 
 def remap(path_str, path_map):
-    for old, new in path_map.items():
+    """Rewrite a path through the most SPECIFIC matching rule.
+
+    NEW_HOME yields a broad rule (/home/old -> /home/new); PATH_MAP entries are
+    usually narrower (/home/old/breakerspace -> /data/breakerspace). Taking the first
+    rule in insertion order let the broad one win, so documents that landed somewhere
+    else on the new machine were mapped to the wrong place — and the next sync saw
+    the whole library as new. Longest prefix first."""
+    for old in sorted(path_map, key=len, reverse=True):
         if path_str == old or path_str.startswith(old + "/"):
-            return new + path_str[len(old):]
+            return path_map[old] + path_str[len(old):]
     return path_str
 
 

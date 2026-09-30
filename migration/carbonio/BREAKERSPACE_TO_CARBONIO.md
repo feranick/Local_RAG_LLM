@@ -76,18 +76,24 @@ container on port 3000.
 ## Stage 1 — Export on the Spark
 
 Copy `migrate_breakerspace.conf` to `~/` on the Spark. It moves only the breakerspace
-volume, `~/breakerspace`, the two configs, the key and both state files — and it asks
-the importer to pull only `bge-m3` and `gemma4:12b-it-qat`, not everything the Spark
-has installed.
+volume, the two configs, the key and both state files — the documents were already
+copied to carbonio separately, so `DOC_DIRS` is empty. It also asks the importer to
+pull only `bge-m3` and `gemma4:12b-it-qat`, not everything the Spark has installed.
 
-If you've moved the lab notes out to `~/lab_notes`, add that folder to `DOC_DIRS` first.
+**Where the documents landed decides whether this works.** The state file is rewritten
+to expect them at `/home/nicola/breakerspace`. If you put them somewhere else, add one
+line to the config (the more specific rule wins over `NEW_HOME`):
+
+```ini
+PATH_MAP = /home/feranick/breakerspace=>/actual/path/on/carbonio
+```
 
 ```bash
 cd ~/Software/Local_RAG_LLM          # with the updated migrate_rag.py
 python3 migration/migrate_rag.py --config ~/migrate_breakerspace.conf --export --dry-run
 ```
 
-✅ *Check:* the dry run lists 1 volume, `~/breakerspace`, and **5** sync files.
+✅ *Check:* the dry run lists 1 volume, **0** document trees, and **5** sync files.
 
 The container has to stop briefly so its database is captured in a consistent state —
 a few minutes of downtime:
@@ -199,8 +205,11 @@ python3 sync/sync_folder.py --config ~/breakerspace.conf --status
 python3 sync/sync_folder.py --config ~/lab_notes_breakerspace.conf --status
 ```
 
-✅ *Check:* **`0 to go`** on both. A number close to the whole library means the path
-rewrite didn't take — do not sync until it's fixed.
+✅ *Check:* **`0 to go`** on both. This is also the real test of your manual copy: the
+state file records each document's content hash, so any file that didn't arrive
+intact, or was changed since, shows up here. A number close to the whole library
+means the path rewrite didn't take — do not sync until it's fixed. A handful means a
+handful of files differ, and a normal sync re-uploads just those.
 
 Then in a **new** chat on the preset:
 
