@@ -38,14 +38,31 @@ sudo reboot
 nvidia-smi          # must show the RTX 5060 Ti with ~16 GB
 ```
 
-**Docker + NVIDIA Container Toolkit.** 26.04 isn't on NVIDIA's official support list
-yet, but its generic apt repository installs and works:
+**Docker** — follow docs.docker.com/engine/install/ubuntu, then let your user run it:
 
 ```bash
-# Docker: follow docs.docker.com/engine/install/ubuntu, then
+docker --version                     # installed?
 sudo usermod -aG docker $USER && newgrp docker
-# NVIDIA Container Toolkit: follow docs.nvidia.com/datacenter/cloud-native/container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker
+```
+
+**NVIDIA Container Toolkit** — this is what provides `nvidia-ctk`. Its apt repository
+is distribution-independent, so it works on 26.04 even though 26.04 isn't on NVIDIA's
+support list yet:
+
+```bash
+sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg2
+
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
 docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi   # GPU visible in a container
 ```
 
