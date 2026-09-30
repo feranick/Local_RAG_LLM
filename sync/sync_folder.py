@@ -94,7 +94,7 @@ Usage:
                                                 # add --dry-run to see the plan first
 """
 
-__version__ = "2026.9.18.1"
+__version__ = "2026.9.30.1"
 
 import os
 import re
@@ -1303,6 +1303,14 @@ def cmd_pull(session, state, dry_run=False):
         die("no TARGET in the config — nothing to pull from")
     print(f"[sync] pulling collection {TARGET} into {WATCH_DIR}")
     files, attempts = collection_files(session)
+    if not files and attempts and all("ConnectionError" in a[2] or "ConnectTimeout" in a[2]
+                                      for a in attempts):
+        # Nothing answered at all: the server isn't running or isn't on this port.
+        # Saying "the association is exposed elsewhere" here sends people hunting an
+        # API quirk when the container simply isn't up.
+        die(f"nothing is answering at {BASE_URL} — is the Open WebUI container running, "
+            f"and on this port?\n       Check:  docker ps --format "
+            f"'{{{{.Names}}}}\\t{{{{.Ports}}}}'\n       Nothing was written.")
     if not files:
         print("[sync] could not find this collection's file list on any known route.")
         print("[sync] what each endpoint answered:")
@@ -2297,8 +2305,29 @@ def main():
                 shutil.rmtree(conv_dir, ignore_errors=True)
 
     # --- prune files deleted from the folder ---
+    # Mass-deletion guard. Pruning mirrors deletions, so a watched folder that is
+    # EMPTY, moved, or pointed at the wrong path looks exactly like "the user deleted
+    # every document" — and the collection is emptied to match. That is almost never
+    # what anyone meant: it happens after a folder move, a typo in WATCH_DIR, an
+    # unmounted disk, or a state file keyed to another location. So when a prune
+    # would remove most of what is tracked, refuse unless explicitly confirmed.
+    doomed = [k for k in files if k not in on_disk] if PRUNE else []
+    if doomed and len(doomed) >= max(5, len(files) // 2) \
+            and "--confirm-mass-prune" not in sys.argv:
+        print(f"[sync] REFUSING TO PRUNE: {len(doomed)} of {len(files)} tracked "
+              f"document(s) would be removed from the collection.")
+        if not on_disk:
+            print(f"[sync]   the watched folder has no indexable files at all: {WATCH_DIR}")
+        else:
+            print(f"[sync]   only {len(on_disk)} file(s) are in {WATCH_DIR}")
+        print("[sync]   That usually means the folder moved, WATCH_DIR is wrong, or the")
+        print("[sync]   state file describes another location — not that you deleted them.")
+        print("[sync]   Nothing was removed. Check with --status. If the documents exist only")
+        print("[sync]   in the collection, --pull brings them into the folder. If you really")
+        print("[sync]   mean to delete them all, re-run with --confirm-mass-prune.")
+        doomed = []
     if PRUNE:
-        for key in [k for k in files if k not in on_disk]:
+        for key in doomed:
             name = pathlib.Path(key).name
             try:
                 print(f"[sync] removing {name} (deleted from folder) …")

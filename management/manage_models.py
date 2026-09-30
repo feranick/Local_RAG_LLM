@@ -38,7 +38,7 @@ Usage:
   python3 manage_models.py --set-default llama3.3:70b --instance http://localhost:3000
 """
 
-__version__ = "2026.9.18.1"
+__version__ = "2026.9.30.1"
 
 import os
 import re

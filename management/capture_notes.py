@@ -34,7 +34,7 @@ After capturing, index them:
     python3 sync_folder.py --config lab_notes.conf
 """
 
-__version__ = "2026.9.18.1"
+__version__ = "2026.9.30.1"
 
 import os
 import re

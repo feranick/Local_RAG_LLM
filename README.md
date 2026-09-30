@@ -1,6 +1,6 @@
 # Local RAG on a Linux workstation
 
-**Version 2026.9.18.1**
+**Version 2026.9.30.1**
 
 Automated setup for running **retrieval-augmented generation (RAG) entirely on your own machine** — point a local model (served by Ollama) at a folder of papers/data and chat with it, with source citations, fully offline.
 

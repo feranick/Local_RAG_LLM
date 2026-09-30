@@ -1,5 +1,7 @@
 # breakerspace → carbonio
 
+**Version 2026.9.30.1**
+
 **From** the DGX Spark (user `feranick`, instance on :3002, ~103 GB unified memory)
 **to** `carbonio.mit.edu` (user `nicola`, Ubuntu 26.04, RTX 5060 Ti 16 GB, instance on :3000).
 

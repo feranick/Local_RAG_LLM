@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # llm_stack_healthcheck.sh
+# Version: 2026.9.30.1
 # Tests the local LLM stack (Ollama, Open WebUI, AnythingLLM) on any Linux host.
 # Reports the detected hardware so the numbers match what setup_local_rag.sh used.
 #

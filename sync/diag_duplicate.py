@@ -12,7 +12,7 @@ Usage:
     python3 diag_duplicate.py "/path/to/file.pdf" --keep     # don't delete the upload
 """
 
-__version__ = "2026.9.18.1"
+__version__ = "2026.9.30.1"
 
 import os
 import sys

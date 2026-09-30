@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # update_local_rag.sh
+# Version: 2026.9.30.1
 # --------------------------------------------------------------------------
 # Updates the local RAG stack when newer versions are available. All data
 # (Docker volumes, AnythingLLM storage, Ollama models) is preserved — only

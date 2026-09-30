@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # uninstall_local_rag.sh
+# Version: 2026.9.30.1
 # --------------------------------------------------------------------------
 # Removes the local RAG stack created by setup_local_rag.sh:
 #   - Open WebUI container   (+ its data volume, only with --purge-data)

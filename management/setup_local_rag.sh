@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
 # setup_local_rag.sh
+# Version: 2026.9.30.1
 # --------------------------------------------------------------------------
 # Automated, idempotent setup of a local RAG stack on a Linux workstation or
 # server (x86_64 or ARM64). Developed on an NVIDIA DGX Spark (GB10, DGX OS),

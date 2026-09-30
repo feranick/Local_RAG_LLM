@@ -1,7 +1,7 @@
 """
 title: Breakerspace Calendar
 author: Nicola Ferralis
-version: 2026.9.18.1
+version: 2026.9.30.1
 license: MIT
 description: Live lookup of MIT DMSE Breakerspace events — trainings, lab-assistant hours, lounge reservations — straight from the LibCal iCal feed. Answers date questions exactly, instead of relying on retrieval.
 """
