@@ -129,6 +129,26 @@ sudo docker start open-webui-breakerspace
 rsync -avP ~/rag_migration/ nicola@carbonio.mit.edu:~/rag_migration/
 ```
 
+**If the two machines can't reach each other**, package the folder and move it by hand
+(USB drive, or via a third machine that reaches both). The volume archive inside is
+already compressed, so a plain `tar` is enough; the checksum proves nothing was
+damaged on the way:
+
+```bash
+# on the Spark
+cd ~ && tar cf breakerspace_migration.tar rag_migration
+sha256sum breakerspace_migration.tar > breakerspace_migration.tar.sha256
+
+# on carbonio, with both files in ~
+cd ~ && sha256sum -c breakerspace_migration.tar.sha256 && tar xf breakerspace_migration.tar
+```
+
+> **Treat the package as sensitive.** It holds the API key, every account's password
+> hash, all chats, and the uploaded copy of every document (Open WebUI keeps them in
+> the volume). Don't park it on a shared or cloud drive unencrypted — if it has to go
+> that way, `gpg -c breakerspace_migration.tar` first — and delete the copies once
+> the import checks out.
+
 ✅ *Check on carbonio:* `du -sh ~/rag_migration` roughly matches the Spark, and
 `manifest.json` is there.
 
@@ -138,7 +158,7 @@ rsync -avP ~/rag_migration/ nicola@carbonio.mit.edu:~/rag_migration/
 
 ```bash
 cd ~/Software/Local_RAG_LLM
-python3 migration/migrate_rag.py --config ~/rag_migration/migrate_breakerspace.conf --import --dry-run
+python3 migration/migrate_rag.py --config ~/rag_migration/migrate_rag.conf --import --dry-run
 ```
 
 ✅ *Check:* it shows `path rewrite: /home/feranick -> /home/nicola`,
@@ -147,7 +167,7 @@ python3 migration/migrate_rag.py --config ~/rag_migration/migrate_breakerspace.c
 is the duplicate-library trap.
 
 ```bash
-python3 migration/migrate_rag.py --config ~/rag_migration/migrate_breakerspace.conf --import
+python3 migration/migrate_rag.py --config ~/rag_migration/migrate_rag.conf --import
 ```
 
 ---
@@ -217,6 +237,7 @@ mixed inventory by model, and nothing needs redoing.
 ## Stage 6 — Verify, in this order
 
 ```bash
+cd ~/Software/Local_RAG_LLM          # the paths below are relative to the repo
 bash management/llm_stack_healthcheck.sh
 python3 sync/sync_folder.py --config ~/breakerspace.conf --status
 python3 sync/sync_folder.py --config ~/lab_notes_breakerspace.conf --status
