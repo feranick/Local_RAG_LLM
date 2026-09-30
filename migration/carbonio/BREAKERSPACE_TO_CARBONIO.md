@@ -3,7 +3,8 @@
 **Version 2026.9.30.1**
 
 **From** the DGX Spark (user `feranick`, instance on :3002, ~103 GB unified memory)
-**to** `carbonio.mit.edu` (user `nicola`, Ubuntu 26.04, RTX 5060 Ti 16 GB, instance on :3000).
+**to** `carbonio.mit.edu` (user `nicola`, Ubuntu 26.04, RTX 5060 Ti 16 GB, instance on :3000,
+served to users as **https://carbonio.mit.edu:8443** — Stage 7).
 
 The Spark copy **stays running**. After this, the two are independent: documents,
 notes, captures and chats added to one do not appear in the other.
@@ -205,6 +206,7 @@ Both collections are listed under Workspace → Knowledge with their document co
 > carbonio has a campus hostname, and Open WebUI serves plain HTTP. With
 > `ENABLE_SIGNUP=true` anyone who can reach port 3000 can register — as *pending*,
 > so they need your approval. Set it to `false` if nobody new should join.
+> Stage 7 puts the instance behind HTTPS and closes plain HTTP to the network.
 
 ---
 
@@ -276,6 +278,112 @@ determinism_check --instance http://localhost:3000 \
   --model <preset-id> --collection 4cc8efc4-2fe5-4071-abc4-d584390bb7b4 \
   --question "Where are the polished cross-section samples stored?" \
   --expect "sample cabinet" --runs 3
+```
+
+---
+
+## Stage 7 — HTTPS on :8443
+
+Open WebUI doesn't serve TLS itself. Apache — already running on carbonio with a
+Let's Encrypt certificate — terminates HTTPS and forwards to the container, which is
+then reachable from carbonio only.
+
+**Why port 8443.** Apache's site root on 443 belongs to `data_collector`, and Open
+WebUI can't live under a sub-path, so it gets its own port with the same certificate.
+Port 80 is held by Tor, deliberately, so nothing here uses it.
+
+**1. Apache site first** — so the switch below costs only seconds of downtime:
+
+```bash
+sudo a2enmod proxy proxy_http proxy_wstunnel headers ssl
+```
+
+Paste the next block **unindented**: the heredoc only ends at an `EOF` at the very
+start of a line.
+
+```bash
+sudo tee /etc/apache2/sites-available/breakerspace.conf >/dev/null <<'EOF'
+Listen 8443
+<VirtualHost *:8443>
+    ServerName carbonio.mit.edu
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/carbonio.mit.edu/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/carbonio.mit.edu/privkey.pem
+
+    ProxyPreserveHost On
+    ProxyTimeout 600
+    RequestHeader set X-Forwarded-Proto "https"
+    ProxyPass        / http://127.0.0.1:3000/ upgrade=websocket flushpackets=on
+    ProxyPassReverse / http://127.0.0.1:3000/
+</VirtualHost>
+EOF
+sudo a2ensite breakerspace
+sudo ufw status | grep -q active && sudo ufw allow 8443/tcp
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+`upgrade=websocket` carries live chat updates; `flushpackets=on` streams answers token
+by token instead of all at once; `ProxyTimeout 600` covers long answers.
+
+**2. Recreate the container local-only.** Same as Stage 4, with three changes — the
+`127.0.0.1:` binding, `WEBUI_URL`, and secure cookies. The volume carries the data:
+
+```bash
+docker stop open-webui-breakerspace && docker rm open-webui-breakerspace
+docker run -d --name open-webui-breakerspace --restart always \
+  -p 127.0.0.1:3000:8080 --gpus all --ulimit nofile=65536:65536 \
+  --add-host=host.docker.internal:host-gateway \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e RAG_OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -e RAG_EMBEDDING_ENGINE=ollama -e RAG_EMBEDDING_MODEL=bge-m3 \
+  -e RAG_EMBEDDING_BATCH_SIZE=32 -e CHUNK_SIZE=1500 -e CHUNK_OVERLAP=200 \
+  -e WEBUI_NAME=breakerspace -e ENABLE_API_KEY=true \
+  -e ENABLE_SIGNUP=true -e DEFAULT_USER_ROLE=pending \
+  -e WEBUI_URL=https://carbonio.mit.edu:8443 \
+  -e WEBUI_SESSION_COOKIE_SECURE=true -e WEBUI_AUTH_COOKIE_SECURE=true \
+  -v open-webui-breakerspace:/app/backend/data \
+  ghcr.io/open-webui/open-webui:main
+```
+
+The `127.0.0.1:` binding is what actually closes plain HTTP: Docker's published ports
+bypass `ufw`, so a firewall rule alone would leave :3000 open to the campus. The local
+tools (sync, capture, healthcheck) keep using `http://localhost:3000` unchanged.
+
+**3. WebUI URL in the admin panel.** Admin → System → General → **WebUI URL** →
+`https://carbonio.mit.edu:8443` → Save. A value saved in the database — even an empty
+one — overrides the `-e WEBUI_URL`, so set it here once. It's used for links Open
+WebUI generates itself (shared chats, notifications).
+
+✅ *Check:*
+
+```bash
+curl -sI https://carbonio.mit.edu:8443 | head -1        # HTTP/1.1 200
+```
+
+From another machine, `curl -m 5 http://carbonio.mit.edu:3000` must **fail** to
+connect. Then log in at **https://carbonio.mit.edu:8443** and confirm an answer
+streams in word by word — all at once means the proxy is buffering.
+
+### Certificate renewal
+
+Let's Encrypt validates over port 80, which Tor holds, so automatic renewal can't
+succeed — and a failed attempt can **stop Apache** (certbot's temporary config fails
+to restart it), taking `data_collector` and breakerspace down together. So the
+automatic timer is off and renewal is manual:
+
+```bash
+systemctl list-timers | grep -i certbot
+sudo systemctl disable --now certbot.timer      # or snap.certbot.renew.timer
+```
+
+Before each expiry (`sudo certbot certificates` shows the date):
+
+```bash
+sudo systemctl stop tor
+sudo certbot renew
+sudo systemctl start tor
+sudo systemctl reload apache2                   # both 443 and 8443 pick up the new cert
+systemctl is-active apache2                     # must say: active
 ```
 
 ---
