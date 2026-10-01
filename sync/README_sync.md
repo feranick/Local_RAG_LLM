@@ -311,7 +311,26 @@ embedding.
 
 ### A. Second library, SAME embedding — one instance
 
-Order: create the collection in the UI, *then* write the config.
+**One command** — `add_folder.py` does every step below from the config of a
+library that already works on the instance:
+
+```bash
+python3 add_folder.py --name breakerspace_lessons --base-config ~/breakerspace.conf --dry-run
+python3 add_folder.py --name breakerspace_lessons --base-config ~/breakerspace.conf
+```
+
+It creates `~/breakerspace_lessons` (if missing) and reports what in it can be
+indexed; creates the collection — or reuses one with that name — with the **same
+sharing** as the base library's collection; writes `~/breakerspace_lessons.conf`
+(the base config with its own `WATCH_DIR`, `TARGET` and `STATE_FILE`; server, key
+and figure settings unchanged); and attaches the collection to the preset(s) that
+already search the base library, after showing the change and asking — the preset
+is backed up to `~/.add_folder_preset_<id>_<time>.json` first. `--sync` runs the
+first sync at the end; `--preset ID` picks presets explicitly; `--no-attach` leaves
+them alone. Re-running is safe: whatever exists is reused. It refuses a folder that
+overlaps the base library's (files would be indexed twice).
+
+By hand, the same thing — create the collection in the UI, *then* write the config:
 
 ```bash
 # 1. Workspace → Knowledge → + New Knowledge, then copy the id from its URL

@@ -68,6 +68,7 @@ Repository = "https://github.com/feranick/Local_RAG_LLM"
 #     sync/sync_folder.py            -> sync_folder
 #     sync/library_stats.py          -> library_stats
 #     sync/diag_duplicate.py         -> diag_duplicate
+#     sync/add_folder.py             -> add_folder
 #     management/manage_models.py    -> manage_models
 #     management/new_rag_instance.py -> new_rag_instance
 #     migration/migrate_rag.py       -> migrate_rag
@@ -82,6 +83,7 @@ platform_probe   = "local_rag_llm.common.platform_probe:main"
 sync_folder      = "local_rag_llm.sync.sync_folder:main"
 library_stats    = "local_rag_llm.sync.library_stats:main"
 diag_duplicate   = "local_rag_llm.sync.diag_duplicate:main"
+add_folder       = "local_rag_llm.sync.add_folder:main"
 manage_models    = "local_rag_llm.management.manage_models:main"
 new_rag_instance = "local_rag_llm.management.new_rag_instance:main"
 migrate_rag      = "local_rag_llm.migration.migrate_rag:main"
@@ -97,6 +99,7 @@ capture_notes    = "local_rag_llm.management.capture_notes:main"
 # rag-sync-folder      = "local_rag_llm.sync.sync_folder:main"
 # rag-library-stats    = "local_rag_llm.sync.library_stats:main"
 # rag-diag-duplicate   = "local_rag_llm.sync.diag_duplicate:main"
+# rag-add-folder       = "local_rag_llm.sync.add_folder:main"
 # rag-manage-models    = "local_rag_llm.management.manage_models:main"
 # rag-new-rag-instance = "local_rag_llm.management.new_rag_instance:main"
 # rag-migrate-rag      = "local_rag_llm.migration.migrate_rag:main"
