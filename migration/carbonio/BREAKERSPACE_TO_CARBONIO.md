@@ -79,14 +79,40 @@ python3 common/platform_probe.py --write     # expect: discrete, ~15 GB usable
 bash management/setup_local_rag.sh --skip-openwebui --skip-anythingllm --skip-models
 ```
 
-**Pin the context server-wide**, so nothing ever falls back to the 4k tier:
+**Ollama server settings.** Written straight to the override file: in
+`systemctl edit`, a line left with its `#`, or typed below the "Edits below this
+comment will be discarded" marker, is silently dropped. `OLLAMA_HOST` is already in
+the main unit, so the override doesn't repeat it. Paste unindented (`EOF` must start
+its line):
 
 ```bash
-sudo systemctl edit ollama
-#   [Service]
-#   Environment="OLLAMA_CONTEXT_LENGTH=16384"
-sudo systemctl restart ollama
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=16384"
+Environment="OLLAMA_NUM_PARALLEL=2"
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+systemctl show ollama -p Environment --no-pager | tr ' ' '\n' | grep OLLAMA
+journalctl -u ollama | grep -o 'OLLAMA_NUM_PARALLEL:[0-9]*' | tail -1    # → 2
 ```
+
+- **`OLLAMA_CONTEXT_LENGTH=16384`** — pins the context server-wide, so nothing falls
+  back to the 4k tier Ollama picks for cards under 24 GB.
+- **`OLLAMA_NUM_PARALLEL=2`** — how many requests one model serves **at the same
+  time**. Open WebUI has no limit of its own on simultaneous chats; Ollama's slots
+  are the limit. With 1 (the default here), two users asking at once are answered
+  one after the other — the second sees a spinner until the first finishes —
+  and background tasks (titles, search queries) queue behind chats too. Each slot
+  reserves its own context memory, so 2 slots at 16k cost twice the context VRAM;
+  with `qwen3.5:9b` (~6 GB loaded) that fits the 16 GB card. More slots mean less
+  waiting, not faster answers: the GPU is shared, so each answer streams a bit
+  slower. Test with two chats started together: both should begin answering,
+  `ollama ps` should stay at **100% GPU** and `nvidia-smi` below ~15 GB. If either
+  slips, go back to 1 or lower `num_ctx`.
+- Optional, **`OLLAMA_MAX_QUEUE=8`** — requests beyond the slots wait in a queue of
+  up to 512 by default; a small queue makes an overloaded server answer with an
+  error quickly instead of a long wait.
 
 ✅ *Check:* `curl -s localhost:11434/api/version` answers, and `docker ps` shows **no**
 container on port 3000.
@@ -241,15 +267,18 @@ here. Open the preset's **editor** (pencil icon, or `…/workspace/models/edit?i
 > `/api/chat`. Minute-long `/api/chat` lines **before** the embed are queued
 > background tasks.
 
-**Keep models resident.** Ollama unloads idle models after 5 minutes, so the first
-chat after a pause pays the load again. Both fit, so keep them loaded:
+**Optional: keep models resident.** Ollama unloads idle models after 5 minutes, so
+the first chat after a pause loads them again. On carbonio that costs only a few
+seconds (a ~6 GB model from local disk), and measured, the difference was minimal —
+so it's **not set**: unloading frees the VRAM when nobody is chatting, which leaves
+room for sync runs with figure captioning. Worth adding if the chat model grows, or
+loads from slow storage — one more line in the override above:
 
-```bash
-sudo systemctl edit ollama
-#   [Service]
-#   Environment="OLLAMA_KEEP_ALIVE=-1"
-sudo systemctl restart ollama          # `ollama ps` → UNTIL: Forever
 ```
+Environment="OLLAMA_KEEP_ALIVE=-1"     # or e.g. 1h; `ollama ps` → UNTIL: Forever
+```
+
+then `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
 
 **3. The figure captioner** in `~/breakerspace.conf`, for documents added from now on:
 
