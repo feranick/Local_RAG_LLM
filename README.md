@@ -720,6 +720,70 @@ paste whole manuals into a chat.
 Reference: [Ollama — context length](https://docs.ollama.com/context-length),
 [Ollama — Modelfile parameters](https://docs.ollama.com/modelfile).
 
+### Several users at once — usage limits
+
+Open WebUI has **no limit of its own** on how many chats run at the same time. The
+limit is Ollama's, and it is a hardware question: every request needs GPU time and
+memory, and anything Ollama can't serve right away waits in a queue.
+
+| Setting (Ollama service) | Default | What it controls |
+|---|---|---|
+| `OLLAMA_NUM_PARALLEL` | chosen by Ollama — **1** observed on a 16 GB card | requests one loaded model serves **simultaneously**. Beyond that, users queue: the second person sees a spinner until the first answer finishes |
+| `OLLAMA_MAX_QUEUE` | 512 | requests allowed to wait before Ollama answers with an error. A small value (e.g. 8) makes an overloaded server fail fast instead of keeping people waiting |
+| `OLLAMA_MAX_LOADED_MODELS` | chosen by Ollama | models resident at once — chat model, embedder and task model each count. Too few and they take turns, reloading on every question |
+| `OLLAMA_KEEP_ALIVE` | 5 min | how long an idle model stays loaded. `-1` = forever. A trade: no reload after a pause, but VRAM stays occupied when nobody is chatting |
+
+**What a parallel slot costs.** Each slot holds its own context, so
+`NUM_PARALLEL=2` at `num_ctx` 16384 reserves twice the context memory. And the GPU
+is shared: total throughput rises a little, but each answer streams more slowly.
+More slots mean **less waiting, not faster answers**. Size it by memory:
+
+- **Small discrete GPU (16 GB):** 2 slots for a ~9B model at 16k, for a handful of users.
+- **Unified memory (Spark):** room for more, but one 256k-context slot can already
+  reserve tens of GB, so cap `num_ctx` before raising slots.
+- After any change, start two chats at the same time and check: both begin answering,
+  `ollama ps` stays at **100% GPU**, `nvidia-smi` stays below the card's memory. A
+  slot that doesn't fit pushes part of the model to the CPU, and then *everyone* is slow.
+
+**Hidden load that competes with users:**
+
+- **Background tasks** (titles, tags, follow-ups, search queries) are model calls
+  in the same queue. On a **thinking** chat model each one can take a minute, so
+  with one slot a question waits behind them. Give them a small non-thinking task
+  model (see *Follow-up suggestions, titles and tags* above), and switch off
+  **Retrieval query generation** if questions retrieve fine as typed.
+- **Syncs with figure captioning** use the GPU for hours. Run them when nobody is
+  chatting, and use the same model for captions and chat (`FIGURE_MODEL`,
+  `FIGURE_NUM_CTX` = the preset's `num_ctx`) so the two don't evict each other.
+
+**Diagnosing a slow start:** `journalctl -u ollama -f | grep GIN` while asking.
+Every request is logged with its duration; minute-long `/api/chat` lines before the
+`/api/embed` are queued background tasks, not your question.
+
+**Setting them.** Write the override file directly. In `systemctl edit`, a line
+left with its `#`, or typed below the *"Edits below this comment will be
+discarded"* marker, is silently dropped. Paste unindented:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=16384"
+Environment="OLLAMA_NUM_PARALLEL=2"
+EOF
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+systemctl show ollama -p Environment --no-pager | tr ' ' '\n' | grep OLLAMA
+journalctl -u ollama | grep -o 'OLLAMA_NUM_PARALLEL:[0-9]*' | tail -1
+```
+
+This **replaces** the override, so include every setting you want kept. If
+`OLLAMA_HOST` is in the main unit (as `setup_local_rag.sh` writes it), it needn't be
+repeated here. A worked example with measured numbers for a 16 GB card is in
+[`migration/carbonio/BREAKERSPACE_TO_CARBONIO.md`](migration/carbonio/BREAKERSPACE_TO_CARBONIO.md).
+
+Who may use the instance at all is set separately, in Open WebUI: user roles, groups
+and per-item access (Admin Panel → Users), and `ENABLE_SIGNUP` / `DEFAULT_USER_ROLE`.
+
 ### "The same question gives a different answer" — measuring it
 
 Some variation is unavoidable, but most of what people notice is fixable, and the
